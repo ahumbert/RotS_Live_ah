@@ -1664,6 +1664,20 @@ SPECIAL(mob_warrior)
     return FALSE;
 }
 
+
+// stabbing ranger:
+// check if mob_flag aggressive OR target is correct racial flag
+// this prog should block regular attacks from AGG flag, really all other actions right?
+//  -- defaults to sneak, hide, stab
+//      -- then only attacks when chasing and enters room with mem target
+//  -- when its hiding and valid target enters, it ambushes
+//  -- option?: when its low hp: it clears memory? (so it doesnt go back to tracking), flees, and tries to stab again?
+
+bool not_moving(char_data* ch, int mv_cnt) {
+    mv_cnt += 1;
+    return mv_cnt < 2;
+}
+
 SPECIAL(mob_ranger)
 {
     /*
@@ -1677,6 +1691,7 @@ SPECIAL(mob_ranger)
     char_data* tmpch;
     room_data* tmproom;
     int tmp, tmp2, mintime, mintmp;
+    int mv_cnt = 0;
 
     bzero((char*)&tmpwtl, sizeof(waiting_type));
 
@@ -1685,19 +1700,38 @@ SPECIAL(mob_ranger)
     if ((callflag != SPECIAL_SELF) && (callflag != SPECIAL_ENTER))
         return 0;
 
+    if(strstr(ch->player.name, "debug")) {
+        sprintf(buf, "prog:top");
+        mudlog(buf, SPL, LEVEL_GOD, FALSE);
+    }
+
     if (GET_POS(host) < POSITION_FIGHTING)
         update_pos(host);
     tmpch = 0;
     if ((callflag == SPECIAL_ENTER) && ch && IS_AGGR_TO(host, ch))
         tmpch = ch;
     else if (callflag == SPECIAL_SELF) {
-        for (tmpch = world[host->in_room].people; tmpch;
-             tmpch = tmpch->next_in_room)
-            if ((tmpch != host) && CAN_SEE(host, tmpch) && IS_AGGR_TO(host, tmpch))
+// should this pick a random target?
+        for (tmpch = world[host->in_room].people; tmpch; tmpch = tmpch->next_in_room) {
+            if(strstr(ch->player.name, "debug")) {
+                sprintf(buf, "sees: %s, agro:%d, raggr:%d, race:%d", GET_NAME(tmpch), IS_AGGR_TO(host, tmpch), host->specials2.pref, (1 << GET_RACE(tmpch)) );
+                mudlog(buf, SPL, LEVEL_GOD, FALSE);
+            }
+            if ((tmpch != host) && CAN_SEE(host, tmpch) && see_hiding(ch) && IS_AGGR_TO(host, tmpch)) {
+                if(strstr(ch->player.name, "debug")) {
+                    sprintf(buf, "BREAK: see_hide:%d", see_hiding(ch));
+                    mudlog(buf, SPL, LEVEL_GOD, FALSE);
+                }
                 break;
+            }
+        }
     }
     /* Ambush */
-    if (tmpch) {
+    if (tmpch && tmpch != host) {
+        if(strstr(ch->player.name, "debug")) {
+            sprintf(buf, "prog: ambushing");
+            mudlog(buf, SPL, LEVEL_GOD, FALSE);
+        }
         tmpwtl.cmd = CMD_AMBUSH;
         tmpwtl.subcmd = 0;
         tmpwtl.targ1.type = TARGET_CHAR;
@@ -1716,28 +1750,45 @@ SPECIAL(mob_ranger)
     tmproom = &world[host->in_room];
     mintime = 999;
     mintmp = NUM_OF_TRACKS;
-    for (tmp = 0; tmp < NUM_OF_TRACKS; tmp++) {
-        tmp2 = (24 + time_info.hours - tmproom->room_track[tmp].data / 8) % 24;
-        if ((tmproom->room_track[tmp].char_number < 0) && (host->specials2.pref & (1 << -tmproom->room_track[tmp].char_number)) && tmp2 < mintime) {
-            mintime = tmp2;
-            mintmp = tmp;
+    if(ch->delay.wait_value == 0) {  // i think removing hunter, sneak, and hide stopped the double delay (something there)  mainly, need to just set memory if desired
+        for (tmp = 0; tmp < NUM_OF_TRACKS; tmp++) {
+            tmp2 = (24 + time_info.hours - tmproom->room_track[tmp].data / 8) % 24;
+            if ((tmproom->room_track[tmp].char_number < 0) && (host->specials2.pref & (1 << -tmproom->room_track[tmp].char_number)) && tmp2 < mintime) {
+                mintime = tmp2;
+                mintmp = tmp;
+            }
+        }
+        if (mintmp < NUM_OF_TRACKS) {
+            tmpwtl.cmd = (tmproom->room_track[mintmp].data & 7) + 1;
+            tmpwtl.subcmd = 0;
+            do_move(host, "", &tmpwtl, (tmproom->room_track[mintmp].data & 7) + 1, 0);
+            if(strstr(ch->player.name, "debug")) {
+                sprintf(buf, "prog: track move");
+                mudlog(buf, SPL, LEVEL_GOD, FALSE);
+            }
+            tmpwtl.targ1.cleanup();
+            return 1;
+        }
+        if(strstr(ch->player.name, "debug")) {          //happens 3 times when 2 moves, 2x when one move, happened 3x with 3 moves (2 negs)!, 5x 4 moves all neg!
+            sprintf(buf, "prog: before move");
+            mudlog(buf, SPL, LEVEL_GOD, FALSE);
+        }
+        if (GET_POS(host) == POSITION_STANDING && not_moving(ch, mv_cnt)) {       // this can proc twice from single one_mob_act
+            tmpwtl.cmd = number(1, NUM_OF_DIRS);
+            tmpwtl.subcmd = 0;
+            if (CAN_GO(host, tmpwtl.cmd - 1)) {
+                do_move(host, "", &tmpwtl, tmpwtl.cmd, 0);          /// extra movement
+                if(strstr(ch->player.name, "debug")) {
+                    sprintf(buf, "PROG::R-MOVE->  dir:%d, mv_cnt:%d", (tmpwtl.cmd -1), mv_cnt);
+                    mudlog(buf, SPL, LEVEL_GOD, FALSE);
+                }
+                mv_cnt = 0;
+            }
+            tmpwtl.targ1.cleanup();
         }
     }
-    if (mintmp < NUM_OF_TRACKS) {
-        tmpwtl.cmd = (tmproom->room_track[mintmp].data & 7) + 1;
-        tmpwtl.subcmd = 0;
-        do_move(host, "", &tmpwtl, (tmproom->room_track[mintmp].data & 7) + 1, 0);
-        tmpwtl.targ1.cleanup();
-        return 0;
-    }
-    if (GET_POS(host) == POSITION_STANDING) {
-        tmpwtl.cmd = number(1, NUM_OF_DIRS);
-        tmpwtl.subcmd = 0;
-        if (CAN_GO(host, tmpwtl.cmd - 1))
-            do_move(host, "", &tmpwtl, tmpwtl.cmd, 0);
-        tmpwtl.targ1.cleanup();
-    }
-    return 0;
+    return 1;  //-- this doesnt return 1 because of other flags, like mob_helper, but also allows double movement per action, possible dbl tracking movement, 
+               //     also might attack after choosing not to stab? (if not, why? .. aggy is passive and raggy is aggressive?)
 }
 
 /*

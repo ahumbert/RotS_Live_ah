@@ -19,6 +19,7 @@
 #include "interpre.h"
 #include "structs.h"
 #include "utils.h"
+#include <cstring>
 
 /* external structs */
 extern struct char_data* character_list;
@@ -88,6 +89,11 @@ void one_mobile_activity(char_data* ch)
         return;
     }
 
+    if(strstr(ch->player.name, "debug")) {
+        sprintf(buf, "MOB_ACT::INFO-> cmd:%d, sub:%d, wait:%d", ch->delay.cmd, ch->delay.subcmd, ch->delay.wait_value);
+        mudlog(buf, SPL, LEVEL_GOD, FALSE);
+    }
+
     is_passive = 0;
     if (MOB_FLAGGED(ch, MOB_PET) && !utils::is_guardian(*ch) && ch->master && char_exists(ch->master_number)) {
         if (ch->in_room == ch->master->in_room) {
@@ -124,6 +130,16 @@ void one_mobile_activity(char_data* ch)
                     return;
                 }
             }
+        }
+
+        if(ch->delay.wait_value && ch->delay.cmd) {
+            if(strstr(ch->player.name, "debug")) {
+                sprintf(buf, "MOB_ACT-> Proc is Busy so RETURNING");
+                mudlog(buf, SPL, LEVEL_GOD, FALSE);
+                sprintf(buf, "MOB_ACT-> Return Info: cmd:%d, sub:%d, wait:%d", ch->delay.cmd, ch->delay.subcmd, ch->delay.wait_value);
+                mudlog(buf, SPL, LEVEL_GOD, FALSE);
+            }
+            return;
         }
 
         /* mob - helper */
@@ -280,22 +296,38 @@ void one_mobile_activity(char_data* ch)
             } /* Scavenger */
 
             if (!IS_SET(ch->specials2.act, MOB_SENTINEL) && (GET_POS(ch) == POSITION_STANDING) && (!ch->master) && ((door = number(0, 45)) < NUM_OF_DIRS) && CAN_GO(ch, door) && !IS_SET(world[EXIT(ch, door)->to_room].room_flags, NO_MOB) && !IS_SET(world[EXIT(ch, door)->to_room].room_flags, DEATH)) {
-                if (ch->specials.last_direction == door)
+                if (ch->specials.last_direction == door) {
+                    if(strstr(ch->player.name, "debug")) {
+                        sprintf(buf, "MOB_ACT-> move 1");
+                        mudlog(buf, SPL, LEVEL_GOD, FALSE);
+                    }
                     ch->specials.last_direction = -1;
-                else {
+                } else {
                     /* checking for STAY flags */
                     if ((!IS_SET(ch->specials2.act, MOB_STAY_ZONE) || (world[EXIT(ch, door)->to_room].zone == world[ch->in_room].zone)) && (!IS_SET(ch->specials2.act, MOB_STAY_TYPE) || (world[EXIT(ch, door)->to_room].sector_type == world[ch->in_room].sector_type))) {
+                        if(strstr(ch->player.name, "debug")) {
+                            sprintf(buf, "MOB_ACT-> move 2");
+                            mudlog(buf, SPL, LEVEL_GOD, FALSE);
+                        }
                         ch->specials.last_direction = door;
                         do_move(ch, "", 0, ++door, 0);
                     }
                 }
             } /* if can go */
+            if(strstr(ch->player.name, "debug")) {
+                sprintf(buf, "MOB_ACT-> move chance: %d", door);
+                mudlog(buf, SPL, LEVEL_GOD, FALSE);
+            }
 
             /* Here go Race aggressions */
             if (ch->specials2.pref) {
                 for (tmp_ch = world[ch->in_room].people; tmp_ch;
                      tmp_ch = tmp_ch->next_in_room)
                     if ((ch != tmp_ch) && (!IS_SET(ch->specials2.act, MOB_MOUNT)) && IS_AGGR_TO(ch, tmp_ch) && CAN_SEE(ch, tmp_ch)) {
+                        if(strstr(ch->player.name, "debug")) {
+                            sprintf(buf, "MOB_ACT-> racial aggr atk");
+                            mudlog(buf, SPL, LEVEL_GOD, FALSE);
+                        }
                         sscanf(tmp_ch->player.name, "%s", buf);
                         wtl.targ1.type = TARGET_CHAR;
                         wtl.targ1.ptr.ch = tmp_ch;
@@ -331,6 +363,10 @@ void one_mobile_activity(char_data* ch)
                     }
                 }
                 if (vict) {
+                    if(strstr(ch->player.name, "debug")) {
+                        sprintf(buf, "MOB_ACT-> reg atk");
+                        mudlog(buf, SPL, LEVEL_GOD, FALSE);
+                    }
                     wtl.targ1.type = TARGET_CHAR;
                     wtl.targ1.ptr.ch = vict;
                     wtl.targ1.ch_num = vict->abs_number;
@@ -370,6 +406,10 @@ void one_mobile_activity(char_data* ch)
                         wtl.targ1.ptr.ch = vict;
                         wtl.targ1.ch_num = vict->abs_number;
                         wtl.cmd = CMD_HIT;
+                        if(strstr(ch->player.name, "debug")) {
+                            sprintf(buf, "MOB_ACT-> Track Attack");
+                            mudlog(buf, SPL, LEVEL_GOD, FALSE);
+                        }
                         do_hit(ch, buf, &wtl, 0, 0);
                     }
                 } else if (IS_SET(ch->specials2.act, MOB_HUNTER) || IS_AFFECTED(ch, AFF_HUNT)) {
@@ -386,12 +426,20 @@ void one_mobile_activity(char_data* ch)
                             tmp = BFS_NO_PATH;
                         if (tmp >= 0) { // found the way, moving there
                             do_move(ch, "", 0, tmp + 1, 0);
+                            if(strstr(ch->player.name, "debug")) {
+                                sprintf(buf, "mob_act: hunter/hunt");
+                                mudlog(buf, SPL, LEVEL_GOD, FALSE);
+                            }
                             break;
                         }
                     }
                 }
             } /* mob memory */
         }
+        // if(strstr(ch->player.name, "debug")) {
+        //     sprintf(buf, "MOB_ACT-> end of single action");
+        //     mudlog(buf, SPL, LEVEL_GOD, FALSE);
+        // }
     } /* If IS_MOB(ch)  */
 }
 
