@@ -1121,6 +1121,8 @@ struct char_data *read_mobile(int nr, int type) {
   void *tmpptr;
   affected_type tmp_aff;
 
+// mudlog("Read mobile", NRM, LEVEL_GOD, TRUE);
+
   if (type == VIRT) {
     if ((i = real_mobile(nr)) < 0) {
       sprintf(buf, "Mobile (V) %d does not exist in database.", nr);
@@ -1244,6 +1246,7 @@ struct char_data *read_mobile(int nr, int type) {
     tmp_aff.modifier = 1;
     tmp_aff.location = APPLY_SPEED;
     tmp_aff.bitvector = 0;
+    tmp_aff.effect_modifier = 0;
     affect_to_char(mob, &tmp_aff);
   }
 
@@ -1256,6 +1259,8 @@ void load_mobiles(FILE *mob_f) {
   int tmp, tmp2, tmp3, tmp4, tmp5, tmp6;
   char chk[10], *tmpptr;
   char letter;
+
+mudlog("Load mobile", NRM, LEVEL_GOD, TRUE);
 
   if (!fscanf(mob_f, "%s\n", chk)) {
     perror("load_mobiles");
@@ -1671,7 +1676,9 @@ int set_exit_state(struct room_data *room, int dir, int newstate) {
 #define KEY_INT(the_field, element)                                            \
   if (!strcmp(line, the_field)) {                                              \
     tmp1 = atoi(value);                                                        \
-    element = tmp1;                                                            \
+sprintf(buf, "line: %s  Field: %s  element: %s  value: %d  tmp1: %d  ", line, the_field, element, value, tmp1); \
+mudlog(buf, NRM, 90, TRUE);    \
+    element = tmp1;                                                            \                                             
     break;                                                                     \
   }
 
@@ -1693,13 +1700,14 @@ int set_exit_state(struct room_data *room, int dir, int newstate) {
 
 #define KEY_AFF(the_field)                                                     \
   if (!strcmp(line, the_field)) {                                              \
-    sscanf(value, "%d %d %d %d %d %d", &tmp1, &tmp2, &tmp3, &tmp4, &tmp5,      \
-           &tmp6);                                                             \
+    sscanf(value, "%d %d %d %d %d %d %d", &tmp1, &tmp2, &tmp3, &tmp4, &tmp5,   \
+           &tmp6, &tmp7);                                                      \
     char_element->affected[tmp1].type = tmp2;                                  \
     char_element->affected[tmp1].duration = tmp3;                              \
     char_element->affected[tmp1].modifier = tmp4;                              \
     char_element->affected[tmp1].location = tmp5;                              \
     char_element->affected[tmp1].bitvector = tmp6;                             \
+    char_element->affected[tmp1].effect_modifier = tmp7;                       \
     break;                                                                     \
   }
 
@@ -1734,11 +1742,13 @@ int set_exit_state(struct room_data *room, int dir, int newstate) {
   }
 
 int load_player(char *name, struct char_file_u *char_element) {
-  int tmp, tmp1, tmp2, tmp3, tmp4, tmp5, tmp6, end, return_value, file_len;
+  int tmp, tmp1, tmp2, tmp3, tmp4, tmp5, tmp6, tmp7, end, return_value, file_len;
   char playerfname[100], line[100];
   char *tmpchar, *value, *ctmp, *position, *pf = 0;
 
   memset((char *)char_element, 0, sizeof(struct char_file_u));
+
+mudlog("Load player", NRM, LEVEL_GOD, TRUE);
 
   for (tmpchar = name; *tmpchar; tmpchar++)
     *tmpchar = tolower(*tmpchar);
@@ -1774,6 +1784,7 @@ int load_player(char *name, struct char_file_u *char_element) {
     char_element->affected[tmp1].modifier = 0;
     char_element->affected[tmp1].location = 0;
     char_element->affected[tmp1].bitvector = 0;
+    char_element->affected[tmp1].effect_modifier = 0;
   }
 
   for (tmp1 = 0; tmp1 < MAX_SKILLS; tmp1++)
@@ -1817,7 +1828,11 @@ int load_player(char *name, struct char_file_u *char_element) {
     case 'C':
       KEY_INT("conditions0", char_element->specials2.conditions[0]);
       KEY_INT("conditions1", char_element->specials2.conditions[1]);
+sprintf(buf, "Thirst BEFORE: %d ", char_element->specials2.conditions[2]);
+mudlog(buf, NRM, LEVEL_GOD, TRUE);
       KEY_INT("conditions2", char_element->specials2.conditions[2]);
+sprintf(buf, "Thirst AFTER: %d ", char_element->specials2.conditions[2]);
+mudlog(buf, NRM, LEVEL_GOD, TRUE);
       KEY_INT("color_mask", char_element->profs.color_mask);
       KEY_ARRAY("color", char_element->profs.colors);
       break;
@@ -1995,6 +2010,8 @@ int load_char(char *name, struct char_file_u *char_element) {
 void store_to_char(struct char_file_u *st, struct char_data *ch) {
   int i;
 
+mudlog("store_to_char ", NRM, LEVEL_GOD, TRUE);
+
   ch->player_index = st->player_index;
   GET_SEX(ch) = st->sex;
   GET_PROF(ch) = st->prof;
@@ -2043,6 +2060,13 @@ void store_to_char(struct char_file_u *st, struct char_data *ch) {
 
   ch->points = st->points;
   ch->specials2 = st->specials2;
+
+if(GET_LEVEL(ch) > 89) {
+  sprintf(buf, "st2char::  specials2: %lu, thirst: %d ", st->specials2, st->specials2.conditions[2]);
+  mudlog(buf, NRM, LEVEL_GOD, TRUE);
+}
+
+
 
   /* New dynamic skill system: only PCs have a skill array allocated. */
 
@@ -2100,6 +2124,9 @@ void char_to_store(struct char_data *ch, struct char_file_u *st) {
   int i;
   struct affected_type *af;
 
+mudlog("IN store_to_char ", NRM, LEVEL_GOD, TRUE);
+
+
   /* Unaffect everything a character can be affected by */
   affect_total(ch, AFFECT_TOTAL_REMOVE);
 
@@ -2114,6 +2141,7 @@ void char_to_store(struct char_data *ch, struct char_file_u *st) {
       st->affected[i].modifier = 0;
       st->affected[i].location = 0;
       st->affected[i].bitvector = 0;
+      st->affected[i].effect_modifier = 0;
       st->affected[i].next = 0;
     }
   }
@@ -2145,6 +2173,8 @@ void char_to_store(struct char_data *ch, struct char_file_u *st) {
   st->tmpabilities = ch->tmpabilities;
   st->points = ch->points;
   st->specials2 = ch->specials2;
+sprintf(buf, "c2s--> specials2: %lu", st->specials2);
+mudlog(buf, NRM, LEVEL_GOD, TRUE);
 
   st->points.dodge = GET_DODGE(ch);
   st->points.OB = GET_OB(ch);
@@ -2308,6 +2338,8 @@ void save_player(struct char_data *ch, int load_room, int index_pos) {
   struct char_file_u chd;
   int tmp;
 
+mudlog("Save player", NRM, LEVEL_GOD, TRUE);
+
   strcpy(name, GET_NAME(ch));
   for (tmpchar = name; *tmpchar; tmpchar++)
     *tmpchar = tolower(*tmpchar);
@@ -2394,6 +2426,10 @@ void save_player(struct char_data *ch, int load_room, int index_pos) {
   fprintf(pf, "conditions0 %d\n", chd.specials2.conditions[0]);
   fprintf(pf, "conditions1 %d\n", chd.specials2.conditions[1]);
   fprintf(pf, "conditions2 %d\n", chd.specials2.conditions[2]);
+
+sprintf(buf, "saveP::conditions2: %d", chd.specials2.conditions[2]);
+mudlog(buf, NRM, LEVEL_GOD, TRUE);
+
   fprintf(pf, "mini_lvl    %d\n", chd.specials2.mini_level);
   fprintf(pf, "morale      %d\n", chd.specials2.morale);
   fprintf(pf, "owner       %d\n", chd.specials2.owner);
@@ -2425,10 +2461,10 @@ void save_player(struct char_data *ch, int load_room, int index_pos) {
 
   for (tmp = 0; tmp < MAX_AFFECT; tmp++)
     if (chd.affected[tmp].duration != 0) {
-      fprintf(pf, "affect      %d %d %d %d %d %ld\n", tmp,
+      fprintf(pf, "affect      %d %d %d %d %d %ld %d\n", tmp,
               chd.affected[tmp].type, chd.affected[tmp].duration,
               chd.affected[tmp].modifier, chd.affected[tmp].location,
-              chd.affected[tmp].bitvector);
+              chd.affected[tmp].bitvector, chd.affected[tmp].effect_modifier);
     }
 
   for (tmp = 0; tmp < MAX_BODYPARTS; tmp++)
@@ -2850,6 +2886,7 @@ void reset_char(struct char_data *ch) {
 /* clear ALL the working variables of a char and do NOT free any space
  * alloc'ed*/
 void clear_char(struct char_data *ch, int mode) {
+mudlog("clear char", NRM, LEVEL_GOD, TRUE);
   memset((char *)ch, (char)'\0', (int)sizeof(struct char_data));
   CREATE1(ch->profs, char_prof_data);
   memset(ch->profs->colors, CNRM,
@@ -2896,6 +2933,8 @@ void init_char(struct char_data *ch) {
   int i;
 
   set_title(ch);
+
+mudlog("init char", NRM, LEVEL_GOD, TRUE);
 
   ch->player.short_descr = 0;
   ch->player.long_descr = 0;

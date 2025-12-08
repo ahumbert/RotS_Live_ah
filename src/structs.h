@@ -782,6 +782,13 @@ struct room_data {
 #define APPLY_SPELL_PEN 38
 #define APPLY_SPELL_POW 39
 
+// DO I NEED THESE????                  --------------  !!!!!!!!!!!!!! not found in search
+#define APPLY_RESIST_FIRE 40
+#define APPLY_RESIST_COLD 41
+#define APPLY_RESIST_LIGHT 42
+#define APPLY_RESIST_ILLU 43
+#define APPLY_RESIST_DARK 44
+
 #define ROOMAFF_SPELL 1
 #define ROOMAFF_EXIT 2
 
@@ -833,12 +840,30 @@ enum player_specs {
 };
 }
 
+/* resistances */
+#define RESIST_NONE 0
+#define RESIST_FIRE 1
+#define RESIST_COLD 2
+#define RESIST_REGN 3
+#define RESIST_PROT 4   // does what???
+#define RESIST_PETS 5      
+#define RESIST_STLH 6
+#define RESIST_PHYS 7  // phys resist
+#define RESIST_TELE 8
+#define RESIST_ILLU 9
+#define RESIST_LGHT 10
+#define RESIST_MIND 11  // this resistance is MIND
+#define RESIST_DARK 12  // dark resist
+#define RESIST_LFGT 13
+
+
+/* specializations */
 #define PLRSPEC_NONE 0
 #define PLRSPEC_FIRE 1
 #define PLRSPEC_COLD 2
 #define PLRSPEC_REGN 3
 #define PLRSPEC_PROT 4
-#define PLRSPEC_PETS 5
+#define PLRSPEC_PETS 5      
 #define PLRSPEC_STLH 6
 #define PLRSPEC_WILD 7
 #define PLRSPEC_TELE 8
@@ -1238,6 +1263,12 @@ struct affected_type {
     sh_int location; /* Tells which ability to change(APPLY_XXX)*/
     long bitvector;  /* Tells which bits to set (AFF_XXX)       */
     sh_int counter;
+
+    int effect_modifier; /* What chance or resistance to apply */
+
+// over casted?? if spells broken out to individual affections, and still displayed under resists, and is wear resist fire,
+//    but player casts higher prot fire, will it update affection and just increase the modifier?
+// --- will 
 
     struct affected_type *next;
 };
@@ -1721,6 +1752,8 @@ struct char_data {
     int interrupt_count =
         0; /* Meant to store times interupted so that npc mages know to stop casting in battle */
     int interrupt_time = 0; /* Meant to be a countdown timer to remove 1 from interrupt_count */
+
+    int debug_flag = 0; /* Imms may SET this for increased demug output */
 
     bool spec_busy;
 };
