@@ -1102,8 +1102,23 @@ void mudlog(char* str, char type, sh_int level, byte file)
     return;
 }
 
+int has_debug_flag(char_data* ch) {
+    return ch->debug_flag;
+}
+
+void debug_flag_msg(char *buf, char_data *ch) {
+    if (has_debug_flag(ch)) {
+        send_to_char(buf, ch);
+    }
+}
+
 void mudlog_debug_mob(char *buf, char_data *ch) {
     mudlog_aliased_mob(buf, ch, "debug");
+}
+
+void mudlog_debug_mob_or_player(char *buf, char_data *ch, char_data *vict) {
+    mudlog_debug_mob(buf, ch);
+    mudlog_debug_mob(buf, vict);
 }
 
 void mudlog_aliased_mob(char *buf, char_data *ch, char *mob_alias) {
@@ -1124,6 +1139,37 @@ void vmudlog(char type, char* format, ...)
     va_end(ap);
 
     mudlog(buf, type, LEVEL_GOD, TRUE);
+}
+
+void lowercase(char *str) {
+    for(int i=0; str[i]; i++) {
+        str[i]=tolower(str[i]);
+    }
+}
+
+void remove_pattern(char *str, char *result, char *patern) {
+    int i, j = 0, k = 0, n = 0, flag = 0;
+
+    for(i = 0 ; str[i] != '\0' ; i++) {
+        k = i;
+        while(str[i] == patern[j]) {
+            i++,j++;
+            if(j == strlen(patern)) {
+                flag = 1;
+                break;
+            }
+        }
+        j = 0;
+
+        if(flag == 0) {
+            i = k;
+        } else {
+            flag = 0;
+        }
+        result[n++] = str[i];
+    }
+    result[n] = '\0';
+    return;
 }
 
 /*
@@ -1200,6 +1246,26 @@ void sprinttype(int type, char* names[], char* result)
         strcpy(result, names[type]);
     else
         strcpy(result, "UNDEFINED");
+}
+
+void sprintbit_affections(long vektor, char* names[], char* result) {
+    long nr;
+    char tmp[255];
+    *result = '\0';
+    if (vektor < 1) {
+        return;
+    }
+    for (nr = 0; vektor; vektor >>= 1) {
+        if (IS_SET(1, vektor) && (vektor != BFS_MARK)) {
+            if (*names[nr] != '\n') {
+                remove_pattern(names[nr], tmp, "V-");
+                sprintf(result, "%s%s\r\n", result, tmp);
+            }
+        }
+        if (*names[nr] != '\r\n')
+            nr++;
+    }
+    lowercase(result);
 }
 
 /* Calculate the REAL time passed over the last t2-t1 centuries (secs) */
@@ -1789,21 +1855,24 @@ void from_list_to_pool(universal_list** list, universal_list** head, universal_l
     free(body);
 }
 
+// TODO: it checks skills[attack_type].skill_spec specs for resistance, but they need to be numbered differently
 int check_resistances(char_data* victim, int attack_type)
 {
     extern skill_data skills[];
 
-    if ((attack_type < MAX_SKILLS) && IS_RESISTANT(victim, skills[attack_type].skill_spec))
+    // if ((attack_type < MAX_SKILLS) && IS_RESISTANT(victim, skills[attack_type].skill_spec))
+    if ((attack_type < MAX_SKILLS) && IS_RESISTANT(victim, skills[attack_type].resist))
         return 1;
 
-    if ((attack_type < MAX_SKILLS) && IS_VULNERABLE(victim, skills[attack_type].skill_spec))
+    // if ((attack_type < MAX_SKILLS) && IS_VULNERABLE(victim, skills[attack_type].skill_spec))
+    if ((attack_type < MAX_SKILLS) && IS_VULNERABLE(victim, skills[attack_type].resist))
         return -1;
 
     if ((attack_type >= TYPE_HIT) && (attack_type <= TYPE_CRUSH) || attack_type == SKILL_ARCHERY) {
-        if (IS_RESISTANT(victim, PLRSPEC_WILD))
+        if (IS_RESISTANT(victim, RESIST_PHYS))
             return 1;
 
-        if (IS_VULNERABLE(victim, PLRSPEC_WILD))
+        if (IS_VULNERABLE(victim, RESIST_PHYS))
             return -1;
     }
 
