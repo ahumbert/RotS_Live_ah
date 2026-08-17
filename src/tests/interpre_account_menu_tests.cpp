@@ -954,7 +954,17 @@ TEST(InterpreAccountMenu, UnlockSelectAllowsOneDifferentLinkedCharacterSelection
     linkless_legolas->player.name = strdup("legolas");
     linkless_legolas->player.level = 45;
     linkless_legolas->specials2.idnum = 5252;
-    linkless_legolas->in_room = 0;
+    /* NOWHERE, not room 0. Entering the game below takes nanny's reconnect branch, which
+       calls act("$n has reconnected.", ..., TO_ROOM); act() resolves that to
+       world[ch->in_room].people, guarded only against NOWHERE and not against
+       top_of_world. The test binary loads no world at all (top_of_world == 0), so room 0
+       is unallocated backing memory: when it happens to still be zeroed this reads a null
+       people list and act() returns harmlessly, but once earlier suites have dirtied the
+       heap it reads garbage and segfaults. That made the whole suite abort partway through
+       depending on how many tests ran before it. NOWHERE makes act() return at its own
+       guard deterministically; the room broadcast is cosmetic and none of the assertions
+       below depend on it. */
+    linkless_legolas->in_room = NOWHERE;
     linkless_legolas->next = nullptr;
     character_list = linkless_legolas;
 
@@ -1741,7 +1751,10 @@ TEST(InterpreAccountMenu, SelectingSameLinklessActiveCharacterReconnectsExisting
     active_descriptor->connected = CON_LINKLS;
     active_descriptor->descriptor = 0;
     char_data* active_character = attach_active_character(active_descriptor, "aragorn", 95, 4242);
-    active_character->in_room = 0;
+    /* NOWHERE, not room 0 -- see the note on linkless_legolas above: this selection takes
+       nanny's reconnect branch, which calls act(..., TO_ROOM) and indexes world[] in a
+       binary that loads no world. */
+    active_character->in_room = NOWHERE;
     register_pc_char(active_character);
     active_character->next = nullptr;
     character_list = active_character;
@@ -1789,7 +1802,10 @@ TEST(InterpreAccountMenu, SelectingSameActivePlayingCharacterUsurpsExistingDescr
     active_descriptor.connected = CON_PLYNG;
     active_descriptor.descriptor = 7;
     char_data* active_character = attach_active_character(&active_descriptor, "aragorn", 95, 4242);
-    active_character->in_room = 0;
+    /* NOWHERE, not room 0 -- see the note on linkless_legolas above: this selection takes
+       nanny's reconnect branch, which calls act(..., TO_ROOM) and indexes world[] in a
+       binary that loads no world. */
+    active_character->in_room = NOWHERE;
     register_pc_char(active_character);
     active_character->next = nullptr;
     character_list = active_character;
@@ -1906,7 +1922,10 @@ TEST(InterpreAccountMenu, StaleAccountBackedCharacterMenuAllowsSelectionWhenAnyA
     descriptor.character->player.name = strdup("legolas");
     descriptor.character->player.level = 45;
     descriptor.character->specials2.idnum = 6262;
-    descriptor.character->in_room = 0;
+    /* NOWHERE, not room 0 -- see the note on linkless_legolas above: this selection takes
+       nanny's reconnect branch, which calls act(..., TO_ROOM) and indexes world[] in a
+       binary that loads no world. */
+    descriptor.character->in_room = NOWHERE;
     descriptor.character->desc = &descriptor;
     descriptor.pos = 2;
     std::snprintf(descriptor.host, sizeof(descriptor.host), "%s", "127.0.0.1");
@@ -1974,7 +1993,10 @@ TEST(InterpreAccountMenu, StaleAccountBackedCharacterMenuAllowsSelectionWhenLink
     descriptor.character->player.name = strdup("legolas");
     descriptor.character->player.level = 45;
     descriptor.character->specials2.idnum = 6262;
-    descriptor.character->in_room = 0;
+    /* NOWHERE, not room 0 -- see the note on linkless_legolas above: this selection takes
+       nanny's reconnect branch, which calls act(..., TO_ROOM) and indexes world[] in a
+       binary that loads no world. */
+    descriptor.character->in_room = NOWHERE;
     descriptor.character->desc = &descriptor;
     descriptor.pos = 2;
     std::snprintf(descriptor.host, sizeof(descriptor.host), "%s", "127.0.0.1");

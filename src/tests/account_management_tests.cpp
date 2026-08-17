@@ -849,6 +849,19 @@ TEST(AccountManagement, FormatsAccountSummariesIncludingLinkedCharacters)
 
 TEST(AccountManagement, FormatsOutOfRangeSummaryTimestampsAsInvalid)
 {
+    /* format_account_summary() only reports "Invalid" for a timestamp that cannot be
+       represented as a time_t. The server builds 32-bit (-m32, and the container is
+       linux/386), where long and time_t are both 4 bytes -- so LONG_MAX is 2147483647,
+       a perfectly valid date (2038-01-19 03:14:07 UTC), and no long value can reach the
+       out-of-range branch at all. This case is only meaningful where long is wider than
+       time_t, which is why it passes on an x86-64 host and fails on the architecture the
+       game actually ships. */
+    if (sizeof(long) <= sizeof(time_t)) {
+        GTEST_SKIP() << "long is not wider than time_t on this build (" << sizeof(long)
+                     << " vs " << sizeof(time_t)
+                     << " bytes); no timestamp can be out of range for time_t.";
+    }
+
     account::AccountData account_data = make_account();
     account_data.created_at = std::numeric_limits<long>::max();
     account_data.updated_at = std::numeric_limits<long>::max();

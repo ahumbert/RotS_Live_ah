@@ -146,7 +146,13 @@ TEST_F(BattleMageProcTest, AggressiveTacticsUseMageAndTacticsBonusesForMentalInt
     BattleMageTestContext context(game_types::PS_BattleMage, TACTICS_BERSERK, 24, 18);
     player_spec::battle_mage_handler handler(&context.character);
 
-    push_test_random_value(0.59);
+    /* The nominal threshold here is base 0.25 + mage 0.24 + tactics 0.10 = 0.59, but
+       computed in float it lands just under, at 0.5899999737739563. Rolling exactly 0.59
+       therefore sits on the wrong side of the comparison. Roll 0.58 so the assertion has
+       real margin, the way the armor-failure test below rolls 0.52 against its 0.53
+       threshold. 0.58 still catches either bonus going missing: without the mage bonus the
+       threshold drops to 0.35, without the tactics bonus to 0.49, and 0.58 exceeds both. */
+    push_test_random_value(0.58);
     EXPECT_FALSE(handler.does_mental_attack_interrupt_spell())
         << "Expected mental interruption checks to use mage and tactics bonuses for battle mages.";
 
