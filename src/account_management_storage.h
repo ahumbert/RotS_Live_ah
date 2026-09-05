@@ -3,6 +3,9 @@
 
 #include "account_management_types.h"
 
+#include <functional>
+#include <string>
+
 namespace account {
 
 std::string account_bucket_for_name(const std::string& name);
@@ -27,6 +30,27 @@ bool read_account_file_uncached(const std::string& root_directory, const std::st
 bool read_account_file_by_email(const std::string& root_directory, const std::string& email, AccountData* account, std::string* error_message = nullptr);
 bool read_account_file_by_identifier(const std::string& root_directory, const std::string& identifier, AccountData* account, std::string* error_message = nullptr);
 
+// One account record found on disk, in either supported layout.
+struct AccountRecordOnDisk {
+    // The bucket entry name: "<email>" for the directory layout, "<name>.json" for the legacy flat one.
+    std::string directory_entry_name;
+    // Full path of the JSON actually read.
+    std::string record_path;
+    // Whether the record parsed. When false, `account` is meaningless and failure_reason says why.
+    bool parsed = false;
+    AccountData account;
+    std::string failure_reason;
+};
+
+// Walks accounts/ and visits every record in either layout, parsed or not. Visits one record at a
+// time rather than returning them all: at boot this runs over every account on the box, and holding
+// every parsed AccountData at once would be a real memory spike on a machine that already swaps.
+// Returns false only when the accounts directory itself cannot be read; an individual bad record is
+// reported to the visitor with parsed == false, never as a failure of the walk.
+bool for_each_account_record_on_disk(const std::string& root_directory,
+    const std::function<void(const AccountRecordOnDisk&)>& visitor,
+    std::string* error_message = nullptr);
+
 std::string serialize_character_migration_to_json(const CharacterMigrationData& migration);
 bool deserialize_character_migration_from_json(const std::string& json, CharacterMigrationData* migration, std::string* error_message = nullptr);
 
@@ -37,7 +61,7 @@ bool read_text_file(const std::string& path, std::string* contents, std::string*
 // Atomic write: temp(path+".tmp") -> fwrite -> rename. Exposed for stage-timing the SAVE
 // pipeline's disk-write step against a throwaway path.
 bool write_text_file_atomically(const std::string& path, const std::string& text,
-                                std::string* error_message);
+    std::string* error_message);
 
 } // namespace account
 

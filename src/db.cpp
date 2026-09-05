@@ -26,6 +26,7 @@
 #include "zone.h"
 
 #include "account_cache.h"
+#include "account_index.h"
 #include "account_management.h"
 #include "big_brother.h"
 #include "char_utils.h"
@@ -311,6 +312,7 @@ void boot_db(void)
     // account_cache.h. This is the adopted Phase-1 optimization; JSON serialize/deserialize stay on v1.
     account_cache::set_enabled(true);
     roster_cache::set_enabled(true);
+    account_index::set_enabled(true);
     log("Account-resolution cache: enabled.");
 
     log("Resetting the game time:");
@@ -626,86 +628,131 @@ void populate_player_index_entry_from_store(const char_file_u& stored_character,
     top_idnum = MAX(top_idnum, indexed_character.specials2.idnum);
 }
 
-void build_account_native_player_index(void)
-{
-    DIR* accounts_root = opendir("accounts");
-    if (accounts_root == nullptr)
-        return;
+namespace {
 
-    while (dirent* bucket_entry = readdir(accounts_root)) {
-        if (bucket_entry->d_name[0] == '.')
-            continue;
-
-        const std::string bucket_path = std::string("accounts/") + bucket_entry->d_name;
-        DIR* bucket_dir = opendir(bucket_path.c_str());
-        if (bucket_dir == nullptr)
-            continue;
-
-        while (dirent* account_entry = readdir(bucket_dir)) {
-            if (account_entry->d_name[0] == '.')
-                continue;
-
-            const std::string account_json_path = bucket_path + "/" + account_entry->d_name + "/account.json";
-            std::string account_json_text;
-            if (!read_text_file_contents(account_json_path, &account_json_text))
-                continue;
-
-            account::AccountData account_data;
-            std::string error_message;
-            if (!account::deserialize_account_from_json(account_json_text, &account_data, &error_message)) {
-                sprintf(buf, "Failed to read account-native index source '%s': %s",
-                    account_json_path.c_str(), error_message.c_str());
-                log(buf);
-                closedir(bucket_dir);
-                closedir(accounts_root);
-                exit(1);
-            }
-
-            if (account::normalize_email(account_data.normalized_email) != std::string(account_entry->d_name)) {
-                sprintf(buf, "Account-native index source '%s' has mismatched normalized email '%s'.",
-                    account_json_path.c_str(), account_data.normalized_email.c_str());
-                log(buf);
-                closedir(bucket_dir);
-                closedir(accounts_root);
-                exit(1);
-            }
-
-            for (const std::string& character_name : account_data.characters) {
-                const std::string character_path = account::account_character_player_path(".", account_data.account_name, character_name);
-
-                char_file_u stored_character {};
-                if (!account::read_account_character_file(".", account_data.account_name, character_name, &stored_character, &error_message)) {
-                    const std::string read_error = error_message;
-                    bool account_character_exists = false;
-                    std::string inspect_error;
-                    if (!account::inspect_account_character_file(".", account_data.account_name, character_name, &account_character_exists, &inspect_error)) {
-                        sprintf(buf, "Failed to inspect account-native character file '%s': %s",
-                            character_path.c_str(), inspect_error.c_str());
-                        log(buf);
-                        closedir(bucket_dir);
-                        closedir(accounts_root);
-                        exit(1);
-                    }
-
-                    if (!account_character_exists)
-                        continue;
-
-                    sprintf(buf, "Failed to read account-native character file '%s': %s",
-                        character_path.c_str(), read_error.c_str());
-                    log(buf);
-                    closedir(bucket_dir);
-                    closedir(accounts_root);
-                    exit(1);
-                }
-
-                populate_player_index_entry_from_store(stored_character, character_path);
-            }
-        }
-
-        closedir(bucket_dir);
+    // Legacy flat records ("accounts/<bucket>/<name>.json") have no per-account directory, so their
+    // entry name is "<name>.json" rather than an email. The directory layout's entry name IS the
+    // email (that is how the storage key is derived on write), so this suffix check is how the
+    // walker tells the two layouts apart without a dedicated flag on AccountRecordOnDisk.
+    bool is_legacy_flat_record_entry(const std::string& directory_entry_name)
+    {
+        static const std::string suffix = ".json";
+        return directory_entry_name.size() > suffix.size()
+            && directory_entry_name.compare(directory_entry_name.size() - suffix.size(), suffix.size(), suffix) == 0;
     }
 
-    closedir(accounts_root);
+    // Quarantine key for a record that could not be indexed. Directory-layout records (parsed or
+    // not) are keyed by their entry name, which is the email itself. A legacy flat record that
+    // parsed is keyed by the email it actually contains. A legacy flat record that did NOT parse has
+    // revealed no email at all -- its entry name is "<name>.json", not an address -- so it is keyed
+    // by its own record path instead, per the addendum: an unparseable flat record must not reserve
+    // an email it never disclosed.
+    std::string account_index_quarantine_key(const account::AccountRecordOnDisk& record, bool is_legacy_flat)
+    {
+        if (!is_legacy_flat)
+            return record.directory_entry_name;
+        if (record.parsed)
+            return account::normalize_email(record.account.normalized_email);
+        return record.record_path;
+    }
+
+    void visit_account_record_for_boot_index(const account::AccountRecordOnDisk& record)
+    {
+        const bool is_legacy_flat = is_legacy_flat_record_entry(record.directory_entry_name);
+
+        if (!record.parsed) {
+            account_index::quarantine(account_index_quarantine_key(record, is_legacy_flat),
+                record.record_path, record.failure_reason);
+            return;
+        }
+
+        if (!is_legacy_flat && account::normalize_email(record.account.normalized_email) != record.directory_entry_name) {
+            sprintf(buf, "Account-native index source '%s' has mismatched normalized email '%s'.",
+                record.record_path.c_str(), record.account.normalized_email.c_str());
+            log(buf);
+            account_index::quarantine(record.directory_entry_name, record.record_path, buf);
+            return;
+        }
+
+        account_index::upsert(record.account, record.record_path);
+
+        // Legacy flat records have no per-account directory, so their characters are not
+        // account-native -- nothing further to index for this record (see task addendum).
+        if (is_legacy_flat)
+            return;
+
+        // record.record_path is ".../<email>/account.json"; its parent directory is the account
+        // directory that owns every character file linked to this record.
+        static const std::string account_json_suffix = "/account.json";
+        const std::string account_directory = record.record_path.substr(
+            0, record.record_path.size() - account_json_suffix.size());
+
+        for (const std::string& character_name : record.account.characters) {
+            // The record we just parsed IS the account, so its directory is already known. Going
+            // through account_character_player_path here would call resolve_account_storage_key ->
+            // read_account_file, a full walk of the account tree, once per linked character.
+            //
+            // The name mirrors character_json_file_name (account_management.cpp:85), which is
+            // slug + ".character.json" where the slug is normalize_account_name. That helper is
+            // private to the account_management translation unit and is not visible here, so the
+            // two pieces are composed directly. If either ever changes, this line changes with it.
+            const std::string character_path = account_directory + "/"
+                + account::normalize_account_name(character_name) + ".character.json";
+
+            char_file_u stored_character {};
+            std::string error_message;
+            if (!account::read_account_character_file(".", record.account.account_name, character_name, &stored_character, &error_message)) {
+                const std::string read_error = error_message;
+                bool account_character_exists = false;
+                std::string inspect_error;
+                if (!account::inspect_account_character_file(".", record.account.account_name, character_name, &account_character_exists, &inspect_error)) {
+                    sprintf(buf, "Failed to inspect account-native character file '%s': %s",
+                        character_path.c_str(), inspect_error.c_str());
+                    log(buf);
+                    account_index::quarantine(record.directory_entry_name, record.record_path, buf);
+                    return;
+                }
+
+                if (!account_character_exists)
+                    continue;
+
+                sprintf(buf, "Failed to read account-native character file '%s': %s",
+                    character_path.c_str(), read_error.c_str());
+                log(buf);
+                account_index::quarantine(record.directory_entry_name, record.record_path, buf);
+                return;
+            }
+
+            populate_player_index_entry_from_store(stored_character, character_path);
+        }
+    }
+
+} // namespace
+
+void build_account_native_player_index(void)
+{
+    std::string error_message;
+    if (!account::for_each_account_record_on_disk(".", visit_account_record_for_boot_index, &error_message))
+        return;
+
+    const std::size_t quarantined = account_index::quarantined_count();
+    if (quarantined > 0) {
+        sprintf(buf, "Account index: %lu record(s) quarantined; use the account index wizard command to list them.",
+            static_cast<unsigned long>(quarantined));
+        log(buf);
+        mudlog(buf, BRF, LEVEL_IMMORT, TRUE);
+    }
+
+    if (quarantined > account_index::MAX_QUARANTINED_RECORDS_AT_BOOT) {
+        sprintf(buf, "Account index: %lu unusable account records exceeds the limit of %lu. Refusing to boot.",
+            static_cast<unsigned long>(quarantined),
+            static_cast<unsigned long>(account_index::MAX_QUARANTINED_RECORDS_AT_BOOT));
+        log(buf);
+        exit(1);
+    }
+
+    sprintf(buf, "Account index: %lu account(s) indexed.", static_cast<unsigned long>(account_index::size()));
+    log(buf);
 }
 
 int load_player_from_account_json_path(char* name, const char* player_path, struct char_file_u* char_element)
@@ -2254,7 +2301,7 @@ int load_player_from_text(char* name, const char* player_text, struct char_file_
         /* clear line, then read off a line */
         memset(line, 0, 99);
         for (tmpchar = position, tmp1 = 0; tmpchar < input_end && (*tmpchar != '\n') && (*tmpchar != '\r') && (*tmpchar != '\0');
-            tmpchar++, tmp1++) {
+             tmpchar++, tmp1++) {
             if (tmp1 >= static_cast<int>(sizeof(line) - 1)) {
                 sprintf(buf, "load_player_from_text: malformed player data for %s (line too long)", name);
                 log(buf);
@@ -2776,7 +2823,7 @@ int create_entry(char* name)
     (player_table + top_of_p_table)->rank = PKILL_UNRANKED;
     (player_table + top_of_p_table)->totalrank = PKILL_UNRANKED;
     for (i = 0; (*(player_table[top_of_p_table].name + i) = LOWER(*(name + i)));
-        i++)
+         i++)
         ;
     return (top_of_p_table);
 }
@@ -3304,7 +3351,7 @@ char* fread_string(FILE* fl, char* error)
             strcat(buf, tmppoint);
 
         for (point = buf + strlen(buf) - 2; point >= buf && isspace(*point);
-            point--)
+             point--)
             continue;
         if ((flag = (*point == '~')))
             *point = 0;
@@ -3866,7 +3913,7 @@ void record_crime(char_data* criminal, char_data* victim, int crime,
     if (IS_NPC(victim) || (GET_LEVEL(victim) >= LEVEL_IMMORT) || (IS_NPC(criminal)))
         return;
     for (tmpchar = world[victim->in_room].people; tmpchar;
-        tmpchar = tmpchar->next_in_room) {
+         tmpchar = tmpchar->next_in_room) {
         if ((tmpchar == criminal) || (IS_NPC(tmpchar)) || (GET_LEVEL(tmpchar) >= LEVEL_IMMORT))
             continue;
         add_crime(criminal->specials2.idnum, victim->specials2.idnum,

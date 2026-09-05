@@ -300,6 +300,65 @@ bool read_account_file_by_identifier(const std::string& root_directory, const st
     return read_account_file(root_directory, identifier, account, error_message);
 }
 
+bool for_each_account_record_on_disk(const std::string& root_directory,
+    const std::function<void(const AccountRecordOnDisk&)>& visitor,
+    std::string* error_message)
+{
+    const std::string accounts_directory = root_directory + "/accounts";
+    DIR* accounts_dir = opendir(accounts_directory.c_str());
+    if (accounts_dir == nullptr) {
+        set_error(error_message, "Failed to open accounts directory '" + accounts_directory + "': " + std::strerror(errno));
+        return false;
+    }
+
+    while (dirent* bucket_entry = readdir(accounts_dir)) {
+        // Skip "." / ".." and any other hidden entry (e.g. a stray .DS_Store or editor swap file) --
+        // this mirrors the boot walker this function replaces, which never treated a dotfile bucket
+        // as an account record to report.
+        if (bucket_entry->d_name[0] == '.')
+            continue;
+
+        const std::string bucket_path = accounts_directory + "/" + bucket_entry->d_name;
+        struct stat bucket_info { };
+        if (stat(bucket_path.c_str(), &bucket_info) != 0 || !S_ISDIR(bucket_info.st_mode))
+            continue;
+
+        DIR* bucket_dir = opendir(bucket_path.c_str());
+        if (bucket_dir == nullptr)
+            continue;
+
+        while (dirent* account_entry = readdir(bucket_dir)) {
+            if (account_entry->d_name[0] == '.')
+                continue;
+
+            AccountRecordOnDisk record;
+            record.directory_entry_name = account_entry->d_name;
+
+            const std::string entry_path = bucket_path + "/" + account_entry->d_name;
+            const bool is_directory_entry = is_directory_bucket_entry(bucket_path, *account_entry);
+            record.record_path = is_directory_entry ? (entry_path + "/account.json") : entry_path;
+
+            AccountData parsed_account;
+            std::string read_error;
+            if (read_account_file_from_bucket_entry(bucket_path, *account_entry, &parsed_account, &read_error)) {
+                record.parsed = true;
+                record.account = std::move(parsed_account);
+            } else {
+                record.parsed = false;
+                record.failure_reason = read_error;
+            }
+
+            visitor(record);
+        }
+
+        closedir(bucket_dir);
+    }
+
+    closedir(accounts_dir);
+    set_error(error_message, "");
+    return true;
+}
+
 std::string account_character_directory(const std::string& root_directory, const std::string& account_name, const std::string&)
 {
     const std::string account_storage_key = resolve_account_storage_key(root_directory, account_name);

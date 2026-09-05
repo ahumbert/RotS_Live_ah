@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+
 namespace {
 
 account::AccountData make_account(const std::string& email, const std::string& name,
@@ -177,6 +179,28 @@ TEST_F(AccountIndexTest, QuarantinedEntriesReportPathAndReason)
     EXPECT_EQ(entries[0].normalized_email, "bad@example.com");
     EXPECT_EQ(entries[0].record_path, "accounts/A-E/bad@example.com/account.json");
     EXPECT_EQ(entries[0].quarantine_reason, "unparseable JSON");
+}
+
+TEST_F(AccountIndexTest, BootToleratesFailuresUpToTheThreshold)
+{
+    for (std::size_t i = 0; i < account_index::MAX_QUARANTINED_RECORDS_AT_BOOT; ++i) {
+        const std::string email = "bad" + std::to_string(i) + "@example.com";
+        account_index::quarantine(email, "accounts/A-E/" + email + "/account.json", "unparseable");
+    }
+
+    EXPECT_EQ(account_index::quarantined_count(), account_index::MAX_QUARANTINED_RECORDS_AT_BOOT);
+    EXPECT_FALSE(account_index::quarantined_count() > account_index::MAX_QUARANTINED_RECORDS_AT_BOOT)
+        << "exactly at the threshold must still boot";
+}
+
+TEST_F(AccountIndexTest, BootRefusesPastTheThreshold)
+{
+    for (std::size_t i = 0; i <= account_index::MAX_QUARANTINED_RECORDS_AT_BOOT; ++i) {
+        const std::string email = "bad" + std::to_string(i) + "@example.com";
+        account_index::quarantine(email, "accounts/A-E/" + email + "/account.json", "unparseable");
+    }
+
+    EXPECT_TRUE(account_index::quarantined_count() > account_index::MAX_QUARANTINED_RECORDS_AT_BOOT);
 }
 
 } // namespace
