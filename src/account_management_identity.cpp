@@ -507,6 +507,16 @@ bool create_account_for_email(const std::string& root_directory, const std::stri
     if (!is_valid_email(email, error_message))
         return false;
 
+    // A quarantined record's lookup below fails the same way an unused address does (see
+    // find_account_by_email_internal's nullptr error_message), which would otherwise read as "this
+    // address is free" and let a new account overwrite a real player's unparseable-but-real record.
+    // Guarded the same way as the resolver fast paths: the index only speaks for the tree it was
+    // built against.
+    if (account_index::is_enabled() && account_index::matches_root(root_directory) && account_index::is_quarantined(email)) {
+        set_error(error_message, "That email address cannot be used right now.");
+        return false;
+    }
+
     std::string storage_error;
     if (account_storage_contains_unreadable_records(root_directory, &storage_error)) {
         set_error(error_message, storage_error);

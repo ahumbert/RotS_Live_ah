@@ -612,4 +612,37 @@ TEST_F(AccountIndexTest, ResolversFallBackToTheScanForAMismatchedRoot)
     EXPECT_EQ(owner, created.account_name);
 }
 
+TEST_F(AccountIndexTest, QuarantinedAddressIsNotFreeForCreation)
+{
+    // create_account_for_email decides an address is free when its lookup fails, and a quarantined
+    // record's lookup fails the same way an unused address's does. Without a guard, this would let a
+    // brand-new account overwrite a real player's unparseable-but-real record.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    account::AccountData created;
+    std::string error_message;
+    {
+        // Root must match the caller's root_directory, exactly like the resolver fast paths --
+        // otherwise the guard would be silently skipped and this test would pass for the wrong
+        // reason.
+        account_index::set_root_directory(root);
+        ScopedIndexEnabled enabled(true);
+        account_index::quarantine("occupied@example.com",
+            "accounts/K-O/occupied@example.com/account.json", "unparseable JSON");
+
+        EXPECT_TRUE(account_index::is_quarantined("occupied@example.com"));
+
+        ASSERT_FALSE(account::create_account_for_email(root, "occupied@example.com", "ValidPass1",
+            1000, &created, &error_message))
+            << "creating here would overwrite a real player's record";
+        account_index::set_root_directory(".");
+    }
+
+    EXPECT_FALSE(error_message.empty());
+    EXPECT_EQ(error_message.find("already exists"), std::string::npos)
+        << "must not disclose that a record exists at this address: " << error_message;
+}
+
 } // namespace
