@@ -753,6 +753,17 @@ namespace {
         if (!validate_identifier_for_path(account_identifier, "Account name", nullptr))
             return "";
 
+        // Index fast path: the storage key is the email that keys the record, which the index
+        // already holds. Deliberately NOT parsed back out of the record path -- for a legacy flat
+        // record (accounts/<bucket>/<name>.json) the parent directory is the bucket, so that would
+        // silently yield "A-E" as an account's storage key.
+        if (account_index::is_enabled()) {
+            std::string storage_key;
+            if (!account_index::find_email_by_account_name(account_identifier, &storage_key, nullptr))
+                return "";
+            return storage_key;
+        }
+
         AccountData stored_account;
         if (read_account_file(root_directory, account_identifier, &stored_account, nullptr))
             return normalize_email(stored_account.normalized_email);
@@ -803,6 +814,21 @@ namespace {
         if (account_path == nullptr) {
             set_error(error_message, "Account-path output parameter must not be null.");
             return false;
+        }
+
+        // Index fast path. The scan below stays as the rollback path for one release; it runs
+        // whenever the index is disabled (the test binary, and any build that turns it off).
+        // account_index::find_path_by_account_name reproduces this function's not-found text
+        // verbatim, and the path it returns may end in "<name>.json" for a legacy flat record --
+        // exactly as the scan's own directory-over-flat precedence would return it.
+        if (account_index::is_enabled()) {
+            std::string indexed_path;
+            if (!account_index::find_path_by_account_name(account_name, &indexed_path, error_message))
+                return false;
+
+            *account_path = indexed_path;
+            set_error(error_message, "");
+            return true;
         }
 
         const std::string normalized_account_name = normalize_account_name(account_name);
@@ -969,6 +995,18 @@ namespace {
         if (account == nullptr) {
             set_error(error_message, "Account output parameter must not be null.");
             return false;
+        }
+
+        // Index fast path -- this is the change that removes the full accounts/ scan from every
+        // login. The record itself is still read from disk (the index holds keys only), and
+        // read_account_file_from_path handles both on-disk layouts, so a legacy flat path needs no
+        // special casing. The unknown-email text matches this function's own below verbatim;
+        // interpre.cpp string-compares against it.
+        if (account_index::is_enabled()) {
+            std::string indexed_path;
+            if (!account_index::find_path_by_email(email, &indexed_path, error_message))
+                return false;
+            return read_account_file_from_path(indexed_path, account, error_message);
         }
 
         const std::string normalized_email = normalize_email(email);
@@ -1703,10 +1741,15 @@ bool write_text_file_atomically(const std::string& path, const std::string& text
 
 // Keep the internal helper fragment before the public fragments. The split is
 // intentionally low-risk and still shares one translation unit for now.
+// clang-format off
+// Order is load-bearing: these fragments are textually included into this TU and each one uses
+// helpers defined by the ones above it. clang-format sorts include blocks alphabetically, which
+// reorders them into a build break -- hence the guard.
 #include "account_management_internal.cpp"
 #include "account_management_identity.cpp"
 #include "account_management_storage.cpp"
 #include "account_management_assets.cpp"
+// clang-format on
 
 namespace {
 
@@ -1733,7 +1776,9 @@ namespace {
 
 } // namespace
 
+// clang-format off
 #include "account_management_migration.cpp"
 #include "account_management_presentation.cpp"
+// clang-format on
 
 } // namespace account

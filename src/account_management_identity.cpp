@@ -905,6 +905,47 @@ bool find_linked_character_owner_account_uncached(const std::string& root_direct
     if (!validate_identifier_for_path(character_name, "Character name", error_message))
         return false;
 
+    // Index fast path. The scan below (find_character_owner_account) stays as the rollback path and
+    // is what runs whenever the index is disabled.
+    //
+    // The return convention here is the whole risk of this function and is taken verbatim from the
+    // scan: "resolved, and this character is linked to no account" is SUCCESS -- true, an empty
+    // owner name and an empty error -- while false means a genuine failure to resolve. The
+    // not-linked case is the common one (every save of an unlinked character), and account_cache
+    // memoizes it, so returning false for it would make ordinary saves look like errors.
+    if (account_index::is_enabled()) {
+        if (owner_account_name == nullptr) {
+            set_error(error_message, "Owner-account output parameter must not be null.");
+            return false;
+        }
+
+        owner_account_name->clear();
+
+        std::string owner_email;
+        std::string index_error;
+        if (!account_index::find_owner_email_by_character(character_name, &owner_email, &index_error)) {
+            // The index reports the two outcomes apart by whether it set a message: empty means
+            // "no account owns this character" (the scan walks the whole tree, matches nothing and
+            // returns true with an empty owner); non-empty means the owning record exists but is
+            // quarantined, which the scan surfaces as a hard failure when the file will not parse.
+            if (!index_error.empty()) {
+                set_error(error_message, index_error);
+                return false;
+            }
+
+            set_error(error_message, "");
+            return true;
+        }
+
+        AccountData owner_account;
+        if (!read_account_file_by_email(root_directory, owner_email, &owner_account, error_message))
+            return false;
+
+        *owner_account_name = owner_account.account_name;
+        set_error(error_message, "");
+        return true;
+    }
+
     return find_character_owner_account(root_directory, character_name, owner_account_name, error_message);
 }
 

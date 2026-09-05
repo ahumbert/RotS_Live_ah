@@ -2,6 +2,8 @@
 
 #include "account_management_identity.h"
 
+#include <cerrno>
+#include <cstring>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -129,9 +131,13 @@ bool find_path_by_email(const std::string& email, std::string* record_path,
 bool find_path_by_account_name(const std::string& account_name, std::string* record_path,
     std::string* error_message)
 {
-    const auto name_entry = g_account_names.find(account::normalize_account_name(account_name));
+    const std::string normalized_account_name = account::normalize_account_name(account_name);
+    const auto name_entry = g_account_names.find(normalized_account_name);
     if (name_entry == g_account_names.end()) {
-        set_error(error_message, "No account exists with that name.");
+        // Verbatim the text find_account_file_path_by_account_name sets when its directory scan
+        // finds no match (account_management.cpp). This function replaces that scan, so callers --
+        // and the tests that assert on the message -- must not be able to tell which one answered.
+        set_error(error_message, "Failed to open account file for account '" + normalized_account_name + "': " + std::strerror(ENOENT));
         return false;
     }
     return find_path_by_email(name_entry->second, record_path, error_message);
@@ -163,6 +169,9 @@ bool find_email_by_account_name(const std::string& account_name, std::string* em
 {
     const auto name_entry = g_account_names.find(account::normalize_account_name(account_name));
     if (name_entry == g_account_names.end()) {
+        // Deliberately NOT the scan text used by find_path_by_account_name above: the scan this one
+        // replaces (resolve_account_storage_key) reports nothing at all, it just returns "". Its
+        // only caller passes a null error_message, so this string is never shown to a player.
         set_error(error_message, "No account exists with that name.");
         return false;
     }

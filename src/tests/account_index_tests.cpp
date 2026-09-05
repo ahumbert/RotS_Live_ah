@@ -1,9 +1,18 @@
 #include "account_index.h"
+#include "account_management.h"
 #include "account_management_types.h"
 
 #include <gtest/gtest.h>
 
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <dirent.h>
 #include <string>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 namespace {
 
@@ -16,6 +25,67 @@ account::AccountData make_account(const std::string& email, const std::string& n
     account.characters = characters;
     return account;
 }
+
+// The resolvers under test read real files, so these need a real accounts/ tree. Kept local rather
+// than shared with account_management_tests.cpp, which has its own copy in its own anonymous
+// namespace.
+class IndexTemporaryDirectory {
+public:
+    IndexTemporaryDirectory()
+    {
+        char directory_template[] = "/tmp/rots-account-index-XXXXXX";
+        char* created_path = mkdtemp(directory_template);
+        EXPECT_NE(created_path, nullptr);
+        if (created_path)
+            m_path = created_path;
+    }
+
+    ~IndexTemporaryDirectory()
+    {
+        if (!m_path.empty())
+            remove_tree(m_path);
+    }
+
+    const std::string& path() const { return m_path; }
+
+private:
+    static void remove_tree(const std::string& path)
+    {
+        DIR* directory = opendir(path.c_str());
+        if (directory == nullptr) {
+            std::remove(path.c_str());
+            return;
+        }
+
+        while (dirent* entry = readdir(directory)) {
+            if (std::strcmp(entry->d_name, ".") == 0 || std::strcmp(entry->d_name, "..") == 0)
+                continue;
+
+            const std::string child_path = path + "/" + entry->d_name;
+            struct stat file_info { };
+            if (stat(child_path.c_str(), &file_info) != 0)
+                continue;
+
+            if (S_ISDIR(file_info.st_mode))
+                remove_tree(child_path);
+            else
+                std::remove(child_path.c_str());
+        }
+
+        closedir(directory);
+        rmdir(path.c_str());
+    }
+
+    std::string m_path;
+};
+
+// Restores the flag no matter how the test exits, so one failing EXPECT cannot leave the index on
+// for every test that runs after it.
+class ScopedIndexEnabled {
+public:
+    explicit ScopedIndexEnabled(bool enabled) { account_index::set_enabled(enabled); }
+    ~ScopedIndexEnabled() { account_index::set_enabled(false); }
+};
 
 class AccountIndexTest : public ::testing::Test {
 protected:
@@ -229,6 +299,170 @@ TEST_F(AccountIndexTest, DirectoryRecordDisplacesAFlatRecordRegardlessOfArrivalO
     ASSERT_TRUE(account_index::find_path_by_email("player@example.com", &path, nullptr));
     EXPECT_EQ(path, "accounts/P-T/player@example.com/account.json")
         << "a directory record arriving after a flat one must still overwrite it";
+}
+
+TEST_F(AccountIndexTest, DisabledIndexIsNotConsulted)
+{
+    account_index::set_enabled(false);
+    account_index::upsert(make_account("player@example.com", "player", { "Frodo" }),
+        "accounts/P-T/player@example.com/account.json");
+
+    // The index still answers its own API when queried directly; is_enabled() only governs whether
+    // the account resolvers consult it. This test pins that distinction so the flag is not
+    // mistakenly wired into the lookups themselves.
+    std::string path;
+    EXPECT_TRUE(account_index::find_path_by_email("player@example.com", &path, nullptr));
+    EXPECT_FALSE(account_index::is_enabled());
+}
+
+TEST_F(AccountIndexTest, UnknownEmailErrorMatchesTheScanText)
+{
+    std::string path;
+    std::string error_message;
+    EXPECT_FALSE(account_index::find_path_by_email("nobody@example.com", &path, &error_message));
+    EXPECT_EQ(error_message, "No account exists for that email address.")
+        << "must match find_account_by_email_internal's text verbatim; tests assert on it";
+}
+
+TEST_F(AccountIndexTest, UnknownAccountNameErrorMatchesTheScanText)
+{
+    std::string path;
+    std::string error_message;
+    EXPECT_FALSE(account_index::find_path_by_account_name("nobody", &path, &error_message));
+    EXPECT_EQ(error_message,
+        std::string("Failed to open account file for account 'nobody': ") + std::strerror(ENOENT))
+        << "must match find_account_file_path_by_account_name's not-found text verbatim";
+}
+
+TEST_F(AccountIndexTest, UnknownCharacterIsReportedWithoutAnErrorMessage)
+{
+    // find_linked_character_owner_account_uncached's index fast path tells "not linked" (a success
+    // for that resolver, true with an empty owner) apart from a real failure by whether a message
+    // was set. An unknown character MUST leave it empty or every save of an unlinked character
+    // starts reporting an error.
+    std::string owner_email;
+    std::string error_message = "sentinel";
+    EXPECT_FALSE(account_index::find_owner_email_by_character("Nobody", &owner_email, &error_message));
+    EXPECT_EQ(error_message, "");
+}
+
+// Step 9 of the task brief: with a real accounts/ tree on disk, every resolver must give the same
+// answer with the index on as it does with the index off (the directory scan). This is the test
+// that would catch a fast path that resolves to the wrong record, not merely a slow one.
+TEST_F(AccountIndexTest, ResolversAgreeWithTheScanWhenTheIndexIsOn)
+{
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    std::string error_message;
+    account::AccountData first_account;
+    ASSERT_TRUE(account::create_account_for_email(root, "agree@example.com", "ValidPass1", 1700000000,
+        &first_account, &error_message))
+        << error_message;
+    ASSERT_TRUE(account::add_character_to_account(&first_account, "Frodo", &error_message))
+        << error_message;
+    ASSERT_TRUE(account::write_account_file(root, first_account, &error_message)) << error_message;
+
+    account::AccountData second_account;
+    ASSERT_TRUE(account::create_account_for_email(root, "other@example.com", "ValidPass1", 1700000000,
+        &second_account, &error_message))
+        << error_message;
+    ASSERT_TRUE(account::add_character_to_account(&second_account, "Samwise", &error_message))
+        << error_message;
+    ASSERT_TRUE(account::write_account_file(root, second_account, &error_message)) << error_message;
+
+    struct Observation {
+        bool by_email_ok = false;
+        std::string by_email_name;
+        bool by_email_error = false;
+        bool by_name_ok = false;
+        std::string by_name_email;
+        bool owner_ok = false;
+        std::string owner_name;
+        std::string owner_error;
+        bool missing_owner_ok = false;
+        std::string missing_owner_name;
+        std::string missing_owner_error;
+        bool unknown_email_ok = false;
+        std::string unknown_email_error;
+        bool unknown_name_ok = false;
+        std::string unknown_name_error;
+        std::string character_directory;
+    };
+
+    const std::string account_name = first_account.account_name;
+
+    const auto observe = [&root, &account_name]() {
+        Observation observation;
+        std::string message;
+
+        account::AccountData read_by_email;
+        observation.by_email_ok = account::read_account_file_by_email(root, "agree@example.com",
+            &read_by_email, &message);
+        observation.by_email_name = read_by_email.account_name;
+        observation.by_email_error = !message.empty();
+
+        account::AccountData read_by_name;
+        observation.by_name_ok = account::read_account_file(root, account_name, &read_by_name,
+            &message);
+        observation.by_name_email = read_by_name.normalized_email;
+
+        observation.owner_ok = account::find_linked_character_owner_account_uncached(root, "Frodo",
+            &observation.owner_name, &observation.owner_error);
+
+        observation.missing_owner_ok = account::find_linked_character_owner_account_uncached(root,
+            "Meriadoc", &observation.missing_owner_name, &observation.missing_owner_error);
+
+        account::AccountData unknown;
+        observation.unknown_email_ok = account::read_account_file_by_email(root, "nobody@example.com",
+            &unknown, &observation.unknown_email_error);
+        observation.unknown_name_ok = account::read_account_file(root, "nobodyatall", &unknown,
+            &observation.unknown_name_error);
+
+        observation.character_directory = account::account_character_directory(root,
+            account_name, "Frodo");
+        return observation;
+    };
+
+    Observation scanned;
+    {
+        ScopedIndexEnabled disabled(false);
+        scanned = observe();
+    }
+
+    Observation indexed;
+    {
+        ScopedIndexEnabled enabled(true);
+        indexed = observe();
+    }
+
+    EXPECT_EQ(scanned.by_email_ok, indexed.by_email_ok);
+    EXPECT_EQ(scanned.by_email_name, indexed.by_email_name);
+    EXPECT_EQ(scanned.by_name_ok, indexed.by_name_ok);
+    EXPECT_EQ(scanned.by_name_email, indexed.by_name_email);
+
+    EXPECT_EQ(scanned.owner_ok, indexed.owner_ok);
+    EXPECT_EQ(scanned.owner_name, indexed.owner_name);
+    EXPECT_EQ(scanned.owner_error, indexed.owner_error);
+
+    // The load-bearing one: an unlinked character resolves successfully with an empty owner and an
+    // empty error. If the index path returned false here, every save of an unlinked character would
+    // start looking like a failure.
+    EXPECT_TRUE(scanned.missing_owner_ok);
+    EXPECT_EQ(scanned.missing_owner_ok, indexed.missing_owner_ok);
+    EXPECT_EQ(scanned.missing_owner_name, indexed.missing_owner_name);
+    EXPECT_EQ(scanned.missing_owner_error, indexed.missing_owner_error);
+    EXPECT_EQ(indexed.missing_owner_name, "");
+    EXPECT_EQ(indexed.missing_owner_error, "");
+
+    EXPECT_EQ(scanned.unknown_email_ok, indexed.unknown_email_ok);
+    EXPECT_EQ(scanned.unknown_email_error, indexed.unknown_email_error);
+    EXPECT_EQ(scanned.unknown_name_ok, indexed.unknown_name_ok);
+    EXPECT_EQ(scanned.unknown_name_error, indexed.unknown_name_error);
+
+    EXPECT_EQ(scanned.character_directory, indexed.character_directory);
+    EXPECT_NE(indexed.character_directory, "");
 }
 
 } // namespace
