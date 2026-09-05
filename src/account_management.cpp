@@ -1,5 +1,6 @@
 #include "account_management.h"
 #include "account_cache.h"
+#include "account_index.h"
 #include "character_json.h"
 #include "exploits_json.h"
 #include "json_utils.h"

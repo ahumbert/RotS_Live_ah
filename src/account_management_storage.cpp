@@ -253,6 +253,11 @@ bool write_account_file(const std::string& root_directory, const AccountData& ac
     if (account_cache::is_enabled())
         account_cache::invalidate_all();
 
+    // Same chokepoint, same condition: after the rename, only on a fully successful write. The
+    // index re-derives every key from the record just written, so link, unlink, rename and an
+    // account-name change are all handled without diffing against what was there before.
+    account_index::upsert(normalized_account, final_path);
+
     set_error(error_message, "");
     return true;
 }
