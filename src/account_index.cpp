@@ -185,6 +185,16 @@ std::vector<Entry> quarantined_entries()
     return quarantined;
 }
 
+std::size_t quarantined_count()
+{
+    std::size_t count = 0;
+    for (const auto& entry : g_entries) {
+        if (entry.second.quarantined)
+            ++count;
+    }
+    return count;
+}
+
 std::size_t size()
 {
     return g_entries.size();

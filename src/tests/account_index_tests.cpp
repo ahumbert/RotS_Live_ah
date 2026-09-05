@@ -123,4 +123,60 @@ TEST_F(AccountIndexTest, FindEmailByAccountNameReturnsFalseForAnUnknownName)
     EXPECT_FALSE(account_index::find_email_by_account_name("nobody", &email, nullptr));
 }
 
+TEST_F(AccountIndexTest, QuarantinedEmailStaysOccupiedSoItCannotBeOverwritten)
+{
+    account_index::quarantine("broken@example.com", "accounts/A-E/broken@example.com/account.json",
+        "unparseable JSON");
+
+    EXPECT_TRUE(account_index::is_quarantined("broken@example.com"));
+
+    std::string path;
+    std::string error_message;
+    EXPECT_FALSE(account_index::find_path_by_email("broken@example.com", &path, &error_message));
+    EXPECT_EQ(error_message, "That account record could not be read.")
+        << "must NOT read as 'no account exists', or creation would write over a real record";
+}
+
+TEST_F(AccountIndexTest, QuarantineDropsTheKeysTheRecordHeldBefore)
+{
+    account_index::upsert(make_account("player@example.com", "player", { "Frodo" }),
+        "accounts/P-T/player@example.com/account.json");
+    account_index::quarantine("player@example.com", "accounts/P-T/player@example.com/account.json",
+        "mismatched email");
+
+    std::string owner_email;
+    EXPECT_FALSE(account_index::find_owner_email_by_character("Frodo", &owner_email, nullptr));
+
+    std::string path;
+    EXPECT_FALSE(account_index::find_path_by_account_name("player", &path, nullptr));
+}
+
+TEST_F(AccountIndexTest, QuarantinedCountTracksOnlyBadRecords)
+{
+    account_index::upsert(make_account("good@example.com", "good", {}),
+        "accounts/F-J/good@example.com/account.json");
+    account_index::quarantine("bad1@example.com", "accounts/A-E/bad1@example.com/account.json", "x");
+    account_index::quarantine("bad2@example.com", "accounts/A-E/bad2@example.com/account.json", "y");
+
+    EXPECT_EQ(account_index::quarantined_count(), 2u);
+    EXPECT_EQ(account_index::size(), 3u);
+}
+
+TEST_F(AccountIndexTest, QuarantineThresholdIsFive)
+{
+    EXPECT_EQ(account_index::MAX_QUARANTINED_RECORDS_AT_BOOT, 5u);
+}
+
+TEST_F(AccountIndexTest, QuarantinedEntriesReportPathAndReason)
+{
+    account_index::quarantine("bad@example.com", "accounts/A-E/bad@example.com/account.json",
+        "unparseable JSON");
+
+    const std::vector<account_index::Entry> entries = account_index::quarantined_entries();
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].normalized_email, "bad@example.com");
+    EXPECT_EQ(entries[0].record_path, "accounts/A-E/bad@example.com/account.json");
+    EXPECT_EQ(entries[0].quarantine_reason, "unparseable JSON");
+}
+
 } // namespace
