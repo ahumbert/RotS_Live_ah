@@ -906,14 +906,15 @@ bool find_linked_character_owner_account_uncached(const std::string& root_direct
         return false;
 
     // Index fast path. The scan below (find_character_owner_account) stays as the rollback path and
-    // is what runs whenever the index is disabled.
+    // is what runs whenever the index is disabled, or when the caller's root_directory is not the
+    // tree the index was built against (its stored paths would belong to the wrong tree).
     //
     // The return convention here is the whole risk of this function and is taken verbatim from the
     // scan: "resolved, and this character is linked to no account" is SUCCESS -- true, an empty
     // owner name and an empty error -- while false means a genuine failure to resolve. The
     // not-linked case is the common one (every save of an unlinked character), and account_cache
     // memoizes it, so returning false for it would make ordinary saves look like errors.
-    if (account_index::is_enabled()) {
+    if (account_index::is_enabled() && account_index::matches_root(root_directory)) {
         if (owner_account_name == nullptr) {
             set_error(error_message, "Owner-account output parameter must not be null.");
             return false;

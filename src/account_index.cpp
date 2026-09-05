@@ -22,8 +22,20 @@ namespace {
     std::unordered_map<std::string, std::string> g_characters;
     // email -> the character keys that email currently owns, so upsert can drop what it no longer owns.
     std::unordered_map<std::string, std::vector<std::string>> g_owned_characters;
+    // Account names claimed by more than one email. A map cannot represent that, and silently
+    // resolving to whichever record was upserted last is destructive, not merely lossy:
+    // write_account_file std::remove()s the path find_account_file_path_by_account_name returns when
+    // it differs from the target (account_management_storage.cpp:240-245), so the record that lost
+    // the race would have its file deleted. The directory scan refused to answer at all in this
+    // situation, and so does the index -- see find_path_by_account_name.
+    std::unordered_set<std::string> g_ambiguous_account_names;
 
     bool g_enabled = false;
+    // The root directory every record_path in here was composed against. The resolvers ignore their
+    // own root_directory argument on the fast path, so answering a caller working against a
+    // different tree would hand back paths from this one. "." is what boot_db and every live call
+    // site use.
+    std::string g_root_directory = ".";
 
     void set_error(std::string* error_message, const std::string& text)
     {
@@ -78,8 +90,17 @@ void upsert(const account::AccountData& account, const std::string& record_path,
     entry.legacy_flat_layout = legacy_flat_layout;
     g_entries[email] = entry;
 
-    if (!entry.normalized_account_name.empty())
+    if (!entry.normalized_account_name.empty()) {
+        // erase_owned_keys above already dropped any name key this email owned, so a key that is
+        // still here belongs to a DIFFERENT email: two records claim one account name. Record that
+        // and let the lookups refuse, exactly as the scan did. Two layouts of the SAME email are not
+        // a duplicate -- that case never reaches here, it is either the early return above or an
+        // email whose own key was just erased.
+        const auto existing_name = g_account_names.find(entry.normalized_account_name);
+        if (existing_name != g_account_names.end() && existing_name->second != email)
+            g_ambiguous_account_names.insert(entry.normalized_account_name);
         g_account_names[entry.normalized_account_name] = email;
+    }
 
     std::vector<std::string> owned;
     owned.reserve(account.characters.size());
@@ -132,6 +153,13 @@ bool find_path_by_account_name(const std::string& account_name, std::string* rec
     std::string* error_message)
 {
     const std::string normalized_account_name = account::normalize_account_name(account_name);
+    if (g_ambiguous_account_names.count(normalized_account_name) != 0) {
+        // Verbatim find_account_file_path_by_account_name's duplicate text (account_management.cpp).
+        // Returning a path here would let write_account_file delete the other record's file.
+        set_error(error_message, "Multiple account records exist for account '" + normalized_account_name + "'.");
+        return false;
+    }
+
     const auto name_entry = g_account_names.find(normalized_account_name);
     if (name_entry == g_account_names.end()) {
         // Verbatim the text find_account_file_path_by_account_name sets when its directory scan
@@ -167,7 +195,13 @@ bool find_owner_email_by_character(const std::string& character_name, std::strin
 bool find_email_by_account_name(const std::string& account_name, std::string* email,
     std::string* error_message)
 {
-    const auto name_entry = g_account_names.find(account::normalize_account_name(account_name));
+    const std::string normalized_account_name = account::normalize_account_name(account_name);
+    if (g_ambiguous_account_names.count(normalized_account_name) != 0) {
+        set_error(error_message, "Multiple account records exist for account '" + normalized_account_name + "'.");
+        return false;
+    }
+
+    const auto name_entry = g_account_names.find(normalized_account_name);
     if (name_entry == g_account_names.end()) {
         // Deliberately NOT the scan text used by find_path_by_account_name above: the scan this one
         // replaces (resolve_account_storage_key) reports nothing at all, it just returns "". Its
@@ -219,12 +253,34 @@ std::size_t size()
     return g_entries.size();
 }
 
+bool is_account_name_ambiguous(const std::string& account_name)
+{
+    return g_ambiguous_account_names.count(account::normalize_account_name(account_name)) != 0;
+}
+
 void clear()
 {
     g_entries.clear();
     g_account_names.clear();
     g_characters.clear();
     g_owned_characters.clear();
+    g_ambiguous_account_names.clear();
+    g_root_directory = ".";
+}
+
+void set_root_directory(const std::string& root_directory)
+{
+    g_root_directory = root_directory;
+}
+
+const std::string& root_directory()
+{
+    return g_root_directory;
+}
+
+bool matches_root(const std::string& root_directory)
+{
+    return root_directory == g_root_directory;
 }
 
 void set_enabled(bool enabled)

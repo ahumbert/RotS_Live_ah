@@ -42,6 +42,13 @@ struct Entry {
 // find_account_file_path_by_account_name applies (account_management.cpp:834ff). Without this,
 // readdir order decides which of the two owns the lookup. A directory record always overwrites a
 // flat one, regardless of arrival order.
+// NOTE: there is deliberately NO erase API, only upsert / quarantine / clear. Nothing in the system
+// deletes an account record or changes an account's email today -- character deletion rewrites the
+// account record, it does not remove one -- so no entry here can go stale. Adding either capability
+// REQUIRES adding an erase path first: without one the index keeps serving a path to a file that no
+// longer exists, and find_account_by_email_internal then answers "Failed to open account file ..."
+// where the caller at interpre.cpp:3030 compares against "No account exists for that email address."
+// to offer account creation. The create-account branch would silently stop working.
 void upsert(const account::AccountData& account, const std::string& record_path,
     bool legacy_flat_layout = false);
 
@@ -50,7 +57,8 @@ void quarantine(const std::string& normalized_email, const std::string& record_p
     const std::string& reason);
 
 // Lookups. Each returns false and sets *error_message (when non-null) if the key is unknown or the
-// record behind it is quarantined.
+// record behind it is quarantined. The account-name lookups additionally refuse an ambiguous name
+// (see is_account_name_ambiguous).
 bool find_path_by_email(const std::string& email, std::string* record_path,
     std::string* error_message);
 bool find_path_by_account_name(const std::string& account_name, std::string* record_path,
@@ -65,6 +73,13 @@ bool find_owner_email_by_character(const std::string& character_name, std::strin
 bool find_email_by_account_name(const std::string& account_name, std::string* email,
     std::string* error_message);
 
+// True when more than one email claims this account name. A map cannot represent that, and
+// resolving to one of them is destructive rather than merely lossy: write_account_file deletes the
+// path find_account_file_path_by_account_name returns when it differs from its target, so the loser
+// would lose its file. The directory scan refused to answer for such a name and so do the two
+// account-name lookups above, with that scan's exact text.
+bool is_account_name_ambiguous(const std::string& account_name);
+
 bool is_quarantined(const std::string& email);
 std::vector<Entry> quarantined_entries();
 std::size_t quarantined_count();
@@ -73,6 +88,15 @@ std::size_t quarantined_count();
 std::size_t size();
 
 void clear();
+
+// The root directory every indexed record_path was composed against ("." for boot_db and every live
+// call site). The resolvers ignore their own root_directory argument once they answer from here, so
+// each fast path falls through to its directory scan when the caller's root does not match this one
+// -- a root mismatch is a programming mistake, not an unknown-key lookup, so falling back to the
+// (correct, slower) scan is the safe response. clear() resets this to ".".
+void set_root_directory(const std::string& root_directory);
+const std::string& root_directory();
+bool matches_root(const std::string& root_directory);
 
 // Whether the account resolvers consult this index. Default OFF so the test binary and any
 // non-server caller keep the exact directory-scanning behaviour; the live server turns it on at

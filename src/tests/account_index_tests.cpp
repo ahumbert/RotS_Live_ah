@@ -433,8 +433,12 @@ TEST_F(AccountIndexTest, ResolversAgreeWithTheScanWhenTheIndexIsOn)
 
     Observation indexed;
     {
+        // Without this the root guard added for the fast paths would make every call fall through
+        // to the scan and the comparison below would be scan-against-scan, i.e. vacuous.
+        account_index::set_root_directory(root);
         ScopedIndexEnabled enabled(true);
         indexed = observe();
+        account_index::set_root_directory(".");
     }
 
     EXPECT_EQ(scanned.by_email_ok, indexed.by_email_ok);
@@ -463,6 +467,149 @@ TEST_F(AccountIndexTest, ResolversAgreeWithTheScanWhenTheIndexIsOn)
 
     EXPECT_EQ(scanned.character_directory, indexed.character_directory);
     EXPECT_NE(indexed.character_directory, "");
+}
+
+// --- Duplicate account names ------------------------------------------------------------------
+// Two records claiming one account name are not merely ambiguous, they are dangerous:
+// write_account_file std::remove()s the path find_account_file_path_by_account_name returns when it
+// differs from the record being written, so resolving to one of the pair deletes the other's file.
+// The directory scan refused to answer; so must the index.
+
+TEST_F(AccountIndexTest, TwoEmailsClaimingOneAccountNameMakeTheNameLookupFail)
+{
+    account_index::upsert(make_account("first@example.com", "shared", { "Frodo" }),
+        "accounts/A-E/first@example.com/account.json");
+    account_index::upsert(make_account("second@example.com", "shared", { "Sam" }),
+        "accounts/P-T/second@example.com/account.json");
+
+    EXPECT_TRUE(account_index::is_account_name_ambiguous("shared"));
+
+    std::string path;
+    std::string error_message;
+    EXPECT_FALSE(account_index::find_path_by_account_name("shared", &path, &error_message));
+    EXPECT_EQ(error_message, "Multiple account records exist for account 'shared'.")
+        << "must match find_account_file_path_by_account_name's duplicate text verbatim";
+
+    std::string email;
+    error_message.clear();
+    EXPECT_FALSE(account_index::find_email_by_account_name("shared", &email, &error_message));
+    EXPECT_EQ(error_message, "Multiple account records exist for account 'shared'.");
+}
+
+TEST_F(AccountIndexTest, AnAmbiguousNameLeaksNoPathToEitherRecord)
+{
+    account_index::upsert(make_account("first@example.com", "shared", { "Frodo" }),
+        "accounts/A-E/first@example.com/account.json");
+    account_index::upsert(make_account("second@example.com", "shared", { "Sam" }),
+        "accounts/P-T/second@example.com/account.json");
+
+    std::string path = "untouched";
+    EXPECT_FALSE(account_index::find_path_by_account_name("shared", &path, nullptr));
+    EXPECT_EQ(path, "untouched") << "a path here would let write_account_file delete the other record";
+
+    std::string email = "untouched";
+    EXPECT_FALSE(account_index::find_email_by_account_name("shared", &email, nullptr));
+    EXPECT_EQ(email, "untouched");
+
+    // The per-email keys are untouched: only the shared NAME is unresolvable.
+    std::string by_email;
+    EXPECT_TRUE(account_index::find_path_by_email("first@example.com", &by_email, nullptr));
+    EXPECT_EQ(by_email, "accounts/A-E/first@example.com/account.json");
+    EXPECT_TRUE(account_index::find_path_by_email("second@example.com", &by_email, nullptr));
+    EXPECT_EQ(by_email, "accounts/P-T/second@example.com/account.json");
+}
+
+TEST_F(AccountIndexTest, OneEmailInBothLayoutsIsNotAmbiguous)
+{
+    // A flat record and a directory record for the SAME email are one account stored two ways --
+    // exactly the case the Task 3 precedence rule exists for -- not two records claiming one name.
+    account_index::upsert(make_account("player@example.com", "player", { "Frodo" }),
+        "accounts/P-T/player.json", /*legacy_flat_layout=*/true);
+    account_index::upsert(make_account("player@example.com", "player", { "Frodo" }),
+        "accounts/P-T/player@example.com/account.json", /*legacy_flat_layout=*/false);
+
+    EXPECT_FALSE(account_index::is_account_name_ambiguous("player"));
+
+    std::string path;
+    ASSERT_TRUE(account_index::find_path_by_account_name("player", &path, nullptr));
+    EXPECT_EQ(path, "accounts/P-T/player@example.com/account.json");
+}
+
+TEST_F(AccountIndexTest, ReUpsertingTheSameRecordDoesNotMakeItsOwnNameAmbiguous)
+{
+    // write_account_file upserts on every account write, so the common case is the same email
+    // re-binding its own name over and over. That must never look like a duplicate.
+    for (int pass = 0; pass < 3; ++pass) {
+        account_index::upsert(make_account("player@example.com", "player", { "Frodo" }),
+            "accounts/P-T/player@example.com/account.json");
+    }
+
+    EXPECT_FALSE(account_index::is_account_name_ambiguous("player"));
+    std::string path;
+    EXPECT_TRUE(account_index::find_path_by_account_name("player", &path, nullptr));
+}
+
+TEST_F(AccountIndexTest, AmbiguityIsCaseInsensitiveLikeEveryOtherKey)
+{
+    account_index::upsert(make_account("first@example.com", "Shared", { "Frodo" }),
+        "accounts/A-E/first@example.com/account.json");
+    account_index::upsert(make_account("second@example.com", "SHARED", { "Sam" }),
+        "accounts/P-T/second@example.com/account.json");
+
+    std::string path;
+    std::string error_message;
+    EXPECT_FALSE(account_index::find_path_by_account_name("sHaReD", &path, &error_message));
+    EXPECT_EQ(error_message, "Multiple account records exist for account 'shared'.");
+}
+
+// --- Root guard ---------------------------------------------------------------------------------
+
+TEST_F(AccountIndexTest, RootDirectoryDefaultsToDotAndClearResetsIt)
+{
+    EXPECT_EQ(account_index::root_directory(), ".");
+    EXPECT_TRUE(account_index::matches_root("."));
+    EXPECT_FALSE(account_index::matches_root("/tmp/elsewhere"));
+
+    account_index::set_root_directory("/tmp/elsewhere");
+    EXPECT_TRUE(account_index::matches_root("/tmp/elsewhere"));
+    EXPECT_FALSE(account_index::matches_root("."));
+
+    account_index::clear();
+    EXPECT_EQ(account_index::root_directory(), ".");
+}
+
+TEST_F(AccountIndexTest, ResolversFallBackToTheScanForAMismatchedRoot)
+{
+    // The fast paths ignore their own root_directory argument, so answering from an index built for
+    // a different tree would hand back paths from that tree. They must fall through to the scan --
+    // which still gets the right answer, just slowly.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    std::string error_message;
+    account::AccountData created;
+    ASSERT_TRUE(account::create_account_for_email(root, "rooted@example.com", "ValidPass1",
+        1700000000, &created, &error_message))
+        << error_message;
+    ASSERT_TRUE(account::add_character_to_account(&created, "Frodo", &error_message)) << error_message;
+    ASSERT_TRUE(account::write_account_file(root, created, &error_message)) << error_message;
+
+    // Index enabled, but still claiming the default "." root while the caller uses the temp tree.
+    ScopedIndexEnabled enabled(true);
+    ASSERT_EQ(account_index::root_directory(), ".");
+
+    account::AccountData read_back;
+    EXPECT_TRUE(account::read_account_file_by_email(root, "rooted@example.com", &read_back,
+        &error_message))
+        << error_message;
+    EXPECT_EQ(read_back.account_name, created.account_name);
+
+    std::string owner;
+    EXPECT_TRUE(account::find_linked_character_owner_account_uncached(root, "Frodo", &owner,
+        &error_message))
+        << error_message;
+    EXPECT_EQ(owner, created.account_name);
 }
 
 } // namespace

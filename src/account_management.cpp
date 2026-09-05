@@ -756,8 +756,10 @@ namespace {
         // Index fast path: the storage key is the email that keys the record, which the index
         // already holds. Deliberately NOT parsed back out of the record path -- for a legacy flat
         // record (accounts/<bucket>/<name>.json) the parent directory is the bucket, so that would
-        // silently yield "A-E" as an account's storage key.
-        if (account_index::is_enabled()) {
+        // silently yield "A-E" as an account's storage key. Guarded on the root the index was built
+        // against: its paths and keys are meaningful only for that tree, so any other root falls
+        // through to the scan below.
+        if (account_index::is_enabled() && account_index::matches_root(root_directory)) {
             std::string storage_key;
             if (!account_index::find_email_by_account_name(account_identifier, &storage_key, nullptr))
                 return "";
@@ -817,11 +819,12 @@ namespace {
         }
 
         // Index fast path. The scan below stays as the rollback path for one release; it runs
-        // whenever the index is disabled (the test binary, and any build that turns it off).
+        // whenever the index is disabled (the test binary, and any build that turns it off) or when
+        // the caller is working against a tree other than the one the index was built for.
         // account_index::find_path_by_account_name reproduces this function's not-found text
         // verbatim, and the path it returns may end in "<name>.json" for a legacy flat record --
         // exactly as the scan's own directory-over-flat precedence would return it.
-        if (account_index::is_enabled()) {
+        if (account_index::is_enabled() && account_index::matches_root(root_directory)) {
             std::string indexed_path;
             if (!account_index::find_path_by_account_name(account_name, &indexed_path, error_message))
                 return false;
@@ -1001,8 +1004,9 @@ namespace {
         // login. The record itself is still read from disk (the index holds keys only), and
         // read_account_file_from_path handles both on-disk layouts, so a legacy flat path needs no
         // special casing. The unknown-email text matches this function's own below verbatim;
-        // interpre.cpp string-compares against it.
-        if (account_index::is_enabled()) {
+        // interpre.cpp string-compares against it. Falls through to the scan for a root the index
+        // was not built against.
+        if (account_index::is_enabled() && account_index::matches_root(root_directory)) {
             std::string indexed_path;
             if (!account_index::find_path_by_email(email, &indexed_path, error_message))
                 return false;

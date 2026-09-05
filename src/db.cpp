@@ -312,6 +312,10 @@ void boot_db(void)
     // account_cache.h. This is the adopted Phase-1 optimization; JSON serialize/deserialize stay on v1.
     account_cache::set_enabled(true);
     roster_cache::set_enabled(true);
+    // The game chdir()s into lib/ before this runs, so every account path in the server is composed
+    // against ".". The index records that root and refuses to answer a resolver called with any
+    // other one (it would hand back paths from this tree) -- see account_index.h.
+    account_index::set_root_directory(".");
     account_index::set_enabled(true);
     log("Account-resolution cache: enabled.");
 
@@ -697,9 +701,13 @@ namespace {
             0, record.record_path.size() - account_json_suffix.size());
 
         for (const std::string& character_name : record.account.characters) {
-            // The record we just parsed IS the account, so its directory is already known. Going
-            // through account_character_player_path here would call resolve_account_storage_key ->
-            // read_account_file, a full walk of the account tree, once per linked character.
+            // The record we just parsed IS the account, so its directory is already known. Both
+            // reads below therefore take the *_from_record forms, which resolve nothing: the
+            // name-taking forms would call read_account_file -> find_account_file_path_by_account_name
+            // and account_character_directory -> resolve_account_storage_key, both of which consult
+            // the very index this walk is still building. That made correctness depend on the upsert
+            // above happening before this loop; it no longer does, and nothing here touches the
+            // index at all.
             //
             // The name mirrors character_json_file_name (account_management.cpp:85), which is
             // slug + ".character.json" where the slug is normalize_account_name. That helper is
@@ -710,11 +718,11 @@ namespace {
 
             char_file_u stored_character {};
             std::string error_message;
-            if (!account::read_account_character_file(".", record.account.account_name, character_name, &stored_character, &error_message)) {
+            if (!account::read_account_character_file_from_record(".", record.account, character_name, &stored_character, &error_message)) {
                 const std::string read_error = error_message;
                 bool account_character_exists = false;
                 std::string inspect_error;
-                if (!account::inspect_account_character_file(".", record.account.account_name, character_name, &account_character_exists, &inspect_error)) {
+                if (!account::inspect_account_character_file_from_record(".", record.account, character_name, &account_character_exists, &inspect_error)) {
                     sprintf(buf, "Failed to inspect account-native character file '%s': %s",
                         character_path.c_str(), inspect_error.c_str());
                     log(buf);

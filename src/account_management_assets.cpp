@@ -11,10 +11,13 @@ bool write_account_character_file(const std::string& root_directory, const std::
     if (!validate_account_owned_character_path(account, stored_character.name, error_message))
         return false;
 
-    const std::string account_directory = account_character_directory(root_directory, account_name, stored_character.name);
+    // Composed from the record we just read rather than resolved back from its name -- see
+    // account_record_directory (account_management_internal.cpp).
+    const std::string account_storage_key = normalize_email(account.normalized_email);
+    const std::string account_directory = account_record_directory(root_directory, account);
     if (!create_directory_if_missing(root_directory + "/accounts", error_message))
         return false;
-    if (!create_directory_if_missing(root_directory + "/accounts/" + account_bucket_for_name(resolve_account_storage_key(root_directory, account_name)), error_message))
+    if (!create_directory_if_missing(root_directory + "/accounts/" + account_bucket_for_name(account_storage_key), error_message))
         return false;
     if (!create_directory_if_missing(account_directory, error_message))
         return false;
@@ -50,14 +53,20 @@ bool write_linked_character_file(const std::string& root_directory, const std::s
 
 bool read_account_character_file(const std::string& root_directory, const std::string& account_name, const std::string& character_name, char_file_u* stored_character, std::string* error_message)
 {
+    AccountData account;
+    if (!read_account_file(root_directory, account_name, &account, error_message))
+        return false;
+
+    return read_account_character_file_from_record(root_directory, account, character_name, stored_character, error_message);
+}
+
+bool read_account_character_file_from_record(const std::string& root_directory, const AccountData& account, const std::string& character_name, char_file_u* stored_character, std::string* error_message)
+{
     if (stored_character == nullptr) {
         set_error(error_message, "Stored character output parameter must not be null.");
         return false;
     }
 
-    AccountData account;
-    if (!read_account_file(root_directory, account_name, &account, error_message))
-        return false;
     if (!validate_account_owned_character_path(account, character_name, error_message))
         return false;
 
@@ -89,6 +98,12 @@ bool inspect_account_character_file(const std::string& root_directory, const std
     AccountData account;
     if (!read_account_file(root_directory, account_name, &account, error_message))
         return false;
+
+    return inspect_account_character_file_from_record(root_directory, account, character_name, exists, error_message);
+}
+
+bool inspect_account_character_file_from_record(const std::string& root_directory, const AccountData& account, const std::string& character_name, bool* exists, std::string* error_message)
+{
     if (!validate_account_owned_character_path(account, character_name, error_message))
         return false;
 
