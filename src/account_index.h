@@ -28,11 +28,22 @@ struct Entry {
     std::string normalized_account_name;
     bool quarantined = false;
     std::string quarantine_reason;
+    // True when this entry came from the legacy flat layout (accounts/<bucket>/<name>.json) rather
+    // than the directory layout. Used only to enforce upsert's directory-over-flat precedence.
+    bool legacy_flat_layout = false;
 };
 
 // Re-derives every key this record owns from the record itself, dropping any key it owned before.
 // Correct across link, unlink, rename and account-name change without diffing old against new.
-void upsert(const account::AccountData& account, const std::string& record_path);
+//
+// `legacy_flat_layout` marks a record read from accounts/<bucket>/<name>.json. When a record already
+// indexed under this email came from the directory layout, a legacy flat record for the same email
+// is IGNORED: the directory layout is authoritative, matching the precedence
+// find_account_file_path_by_account_name applies (account_management.cpp:834ff). Without this,
+// readdir order decides which of the two owns the lookup. A directory record always overwrites a
+// flat one, regardless of arrival order.
+void upsert(const account::AccountData& account, const std::string& record_path,
+    bool legacy_flat_layout = false);
 
 // Records an account file we could not use, keyed by its directory name. Its email stays occupied.
 void quarantine(const std::string& normalized_email, const std::string& record_path,

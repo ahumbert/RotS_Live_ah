@@ -203,4 +203,32 @@ TEST_F(AccountIndexTest, BootRefusesPastTheThreshold)
     EXPECT_TRUE(account_index::quarantined_count() > account_index::MAX_QUARANTINED_RECORDS_AT_BOOT);
 }
 
+TEST_F(AccountIndexTest, FlatRecordDoesNotDisplaceADirectoryRecordForTheSameEmail)
+{
+    const account::AccountData directory_account = make_account("player@example.com", "player", { "Frodo" });
+    account_index::upsert(directory_account, "accounts/P-T/player@example.com/account.json", /*legacy_flat_layout=*/false);
+
+    const account::AccountData flat_account = make_account("player@example.com", "player", { "Frodo" });
+    account_index::upsert(flat_account, "accounts/P-T/player.json", /*legacy_flat_layout=*/true);
+
+    std::string path;
+    ASSERT_TRUE(account_index::find_path_by_email("player@example.com", &path, nullptr));
+    EXPECT_EQ(path, "accounts/P-T/player@example.com/account.json")
+        << "the directory record must remain authoritative; the flat record must not win";
+}
+
+TEST_F(AccountIndexTest, DirectoryRecordDisplacesAFlatRecordRegardlessOfArrivalOrder)
+{
+    const account::AccountData flat_account = make_account("player@example.com", "player", { "Frodo" });
+    account_index::upsert(flat_account, "accounts/P-T/player.json", /*legacy_flat_layout=*/true);
+
+    const account::AccountData directory_account = make_account("player@example.com", "player", { "Frodo" });
+    account_index::upsert(directory_account, "accounts/P-T/player@example.com/account.json", /*legacy_flat_layout=*/false);
+
+    std::string path;
+    ASSERT_TRUE(account_index::find_path_by_email("player@example.com", &path, nullptr));
+    EXPECT_EQ(path, "accounts/P-T/player@example.com/account.json")
+        << "a directory record arriving after a flat one must still overwrite it";
+}
+
 } // namespace

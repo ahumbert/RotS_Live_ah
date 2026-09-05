@@ -38,6 +38,9 @@ struct AccountRecordOnDisk {
     std::string record_path;
     // Whether the record parsed. When false, `account` is meaningless and failure_reason says why.
     bool parsed = false;
+    // True when this record came from the directory layout (<email>/account.json), false for the
+    // legacy flat layout (<name>.json). Taken from stat(), not guessed from the entry name.
+    bool directory_layout = false;
     AccountData account;
     std::string failure_reason;
 };

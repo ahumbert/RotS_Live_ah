@@ -630,26 +630,16 @@ void populate_player_index_entry_from_store(const char_file_u& stored_character,
 
 namespace {
 
-    // Legacy flat records ("accounts/<bucket>/<name>.json") have no per-account directory, so their
-    // entry name is "<name>.json" rather than an email. The directory layout's entry name IS the
-    // email (that is how the storage key is derived on write), so this suffix check is how the
-    // walker tells the two layouts apart without a dedicated flag on AccountRecordOnDisk.
-    bool is_legacy_flat_record_entry(const std::string& directory_entry_name)
-    {
-        static const std::string suffix = ".json";
-        return directory_entry_name.size() > suffix.size()
-            && directory_entry_name.compare(directory_entry_name.size() - suffix.size(), suffix.size(), suffix) == 0;
-    }
-
     // Quarantine key for a record that could not be indexed. Directory-layout records (parsed or
     // not) are keyed by their entry name, which is the email itself. A legacy flat record that
     // parsed is keyed by the email it actually contains. A legacy flat record that did NOT parse has
     // revealed no email at all -- its entry name is "<name>.json", not an address -- so it is keyed
     // by its own record path instead, per the addendum: an unparseable flat record must not reserve
-    // an email it never disclosed.
-    std::string account_index_quarantine_key(const account::AccountRecordOnDisk& record, bool is_legacy_flat)
+    // an email it never disclosed. record.directory_layout comes straight from stat() in the
+    // enumerator, not guessed from the entry name.
+    std::string account_index_quarantine_key(const account::AccountRecordOnDisk& record)
     {
-        if (!is_legacy_flat)
+        if (record.directory_layout)
             return record.directory_entry_name;
         if (record.parsed)
             return account::normalize_email(record.account.normalized_email);
@@ -658,27 +648,46 @@ namespace {
 
     void visit_account_record_for_boot_index(const account::AccountRecordOnDisk& record)
     {
-        const bool is_legacy_flat = is_legacy_flat_record_entry(record.directory_entry_name);
-
         if (!record.parsed) {
-            account_index::quarantine(account_index_quarantine_key(record, is_legacy_flat),
+            // The single most likely failure -- a corrupt account.json -- must leave per-record
+            // evidence in the log, not just the aggregate count; this mirrors the message the
+            // exit(1) it replaced used to print.
+            sprintf(buf, "Failed to read account-native index source '%s': %s",
+                record.record_path.c_str(), record.failure_reason.c_str());
+            log(buf);
+            account_index::quarantine(account_index_quarantine_key(record),
                 record.record_path, record.failure_reason);
             return;
         }
 
-        if (!is_legacy_flat && account::normalize_email(record.account.normalized_email) != record.directory_entry_name) {
-            sprintf(buf, "Account-native index source '%s' has mismatched normalized email '%s'.",
-                record.record_path.c_str(), record.account.normalized_email.c_str());
-            log(buf);
-            account_index::quarantine(record.directory_entry_name, record.record_path, buf);
-            return;
+        if (record.directory_layout) {
+            if (account::normalize_email(record.account.normalized_email) != record.directory_entry_name) {
+                sprintf(buf, "Account-native index source '%s' has mismatched normalized email '%s'.",
+                    record.record_path.c_str(), record.account.normalized_email.c_str());
+                log(buf);
+                account_index::quarantine(record.directory_entry_name, record.record_path, buf);
+                return;
+            }
+        } else {
+            // A legacy flat record that discloses no usable email cannot be reached by
+            // find_path_by_email/find_email_by_account_name once the index is authoritative (Task
+            // 5), so silently indexing nothing for it would make the record vanish -- neither
+            // indexed, quarantined, nor counted. Quarantine it instead, keyed by its own path since
+            // it has revealed no email to key it by.
+            if (account::normalize_email(record.account.normalized_email).empty()) {
+                sprintf(buf, "Legacy flat account record '%s' has no usable email address.",
+                    record.record_path.c_str());
+                log(buf);
+                account_index::quarantine(record.record_path, record.record_path, buf);
+                return;
+            }
         }
 
-        account_index::upsert(record.account, record.record_path);
+        account_index::upsert(record.account, record.record_path, !record.directory_layout);
 
         // Legacy flat records have no per-account directory, so their characters are not
         // account-native -- nothing further to index for this record (see task addendum).
-        if (is_legacy_flat)
+        if (!record.directory_layout)
             return;
 
         // record.record_path is ".../<email>/account.json"; its parent directory is the account

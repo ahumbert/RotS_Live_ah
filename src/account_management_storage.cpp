@@ -331,12 +331,34 @@ bool for_each_account_record_on_disk(const std::string& root_directory,
             if (account_entry->d_name[0] == '.')
                 continue;
 
-            AccountRecordOnDisk record;
-            record.directory_entry_name = account_entry->d_name;
-
             const std::string entry_path = bucket_path + "/" + account_entry->d_name;
             const bool is_directory_entry = is_directory_bucket_entry(bucket_path, *account_entry);
-            record.record_path = is_directory_entry ? (entry_path + "/account.json") : entry_path;
+
+            // Only visit genuine CANDIDATE records: a directory whose account.json exists, or a
+            // regular file whose name ends in ".json". Everything else is filesystem litter, not an
+            // account record -- most notably a directory with no account.json yet, which is a normal
+            // transient artifact (write_account_file creates the account directory before it writes
+            // the temp file, so a crash between those two steps leaves one behind). Litter must not
+            // be visited at all, so it never counts against MAX_QUARANTINED_RECORDS_AT_BOOT. A
+            // candidate that then fails to parse still gets visited with parsed == false below.
+            std::string candidate_record_path;
+            if (is_directory_entry) {
+                const std::string account_json_path = entry_path + "/account.json";
+                struct stat account_json_info { };
+                if (stat(account_json_path.c_str(), &account_json_info) != 0)
+                    continue;
+                candidate_record_path = account_json_path;
+            } else {
+                const std::string file_name = account_entry->d_name;
+                if (!(file_name.length() >= 6 && file_name.compare(file_name.length() - 5, 5, ".json") == 0))
+                    continue;
+                candidate_record_path = entry_path;
+            }
+
+            AccountRecordOnDisk record;
+            record.directory_entry_name = account_entry->d_name;
+            record.record_path = candidate_record_path;
+            record.directory_layout = is_directory_entry;
 
             AccountData parsed_account;
             std::string read_error;

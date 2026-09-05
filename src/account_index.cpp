@@ -52,10 +52,19 @@ namespace {
 
 } // namespace
 
-void upsert(const account::AccountData& account, const std::string& record_path)
+void upsert(const account::AccountData& account, const std::string& record_path,
+    bool legacy_flat_layout)
 {
     const std::string email = account::normalize_email(account.normalized_email);
     if (email.empty())
+        return;
+
+    // Directory-over-flat precedence: a legacy flat record must not displace a directory record (or
+    // a quarantined directory record -- quarantine() leaves legacy_flat_layout at its default of
+    // false) already indexed under the same email. Without this, whichever one readdir happens to
+    // visit last would silently win.
+    const auto existing = g_entries.find(email);
+    if (legacy_flat_layout && existing != g_entries.end() && !existing->second.legacy_flat_layout)
         return;
 
     erase_owned_keys(email);
@@ -64,6 +73,7 @@ void upsert(const account::AccountData& account, const std::string& record_path)
     entry.normalized_email = email;
     entry.record_path = record_path;
     entry.normalized_account_name = account::normalize_account_name(account.account_name);
+    entry.legacy_flat_layout = legacy_flat_layout;
     g_entries[email] = entry;
 
     if (!entry.normalized_account_name.empty())
