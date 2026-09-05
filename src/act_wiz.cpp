@@ -14,7 +14,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "account_index.h"
 #include "account_management.h"
+#include "account_management_storage.h"
 #include "char_utils.h"
 #include "color.h"
 #include "comm.h"
@@ -3168,7 +3170,72 @@ ACMD(do_account)
     half_chop(buf, account_identifier, value);
 
     if (!*subcommand) {
-        send_to_char("Usage: account <show|verify|unverify|block|unblock|passwd|addchar|migratechar|unlockselect> <email-or-account> [value]\n\r", ch);
+        send_to_char("Usage: account <show|verify|unverify|block|unblock|passwd|addchar|migratechar|unlockselect|index> <email-or-account> [value]\n\r", ch);
+        return;
+    }
+
+    if (!str_cmp(subcommand, "index")) {
+        char index_action[MAX_INPUT_LENGTH];
+        half_chop(buf, index_action, value);
+
+        sprintf(buf1, "Account index: %lu record(s) indexed, %lu quarantined.\n\r",
+            static_cast<unsigned long>(account_index::size()),
+            static_cast<unsigned long>(account_index::quarantined_count()));
+        send_to_char(buf1, ch);
+
+        for (const account_index::Entry& entry : account_index::quarantined_entries()) {
+            sprintf(buf1, "  QUARANTINED %s (%s): %s\n\r", entry.normalized_email.c_str(),
+                entry.record_path.c_str(), entry.quarantine_reason.c_str());
+            send_to_char(buf1, ch);
+        }
+
+        if (!str_cmp(index_action, "on") || !str_cmp(index_action, "off")) {
+            // The spec's rollback story is "one setting, not a redeploy". Turning the index back ON
+            // is safe at any time only because it is maintained on every write regardless of this
+            // flag -- the flag governs whether the resolvers CONSULT it, never whether it is kept
+            // current (account_management_storage.cpp's write chokepoint calls account_index::upsert
+            // unconditionally). If that ever stops being true, this toggle would need to rebuild
+            // before it arms.
+            const bool enable = !str_cmp(index_action, "on");
+            account_index::set_enabled(enable);
+            sprintf(buf1, "Account index lookups are now %s.\n\r", enable ? "ON" : "OFF");
+            send_to_char(buf1, ch);
+            sprintf(buf1, "%s turned the account index %s.", GET_NAME(ch), enable ? "on" : "off");
+            mudlog(buf1, BRF, LEVEL_GRGOD, TRUE);
+            return;
+        }
+
+        if (!str_cmp(index_action, "verify")) {
+            std::vector<account_index::Entry> records_on_disk;
+            std::string enum_error;
+            const bool walked = account::for_each_account_record_on_disk(
+                ".",
+                [&records_on_disk](const account::AccountRecordOnDisk& record) {
+                    account_index::Entry entry;
+                    entry.record_path = record.record_path;
+                    entry.normalized_email = account::normalize_email(record.account.normalized_email);
+                    entry.normalized_account_name = account::normalize_account_name(record.account.account_name);
+                    records_on_disk.push_back(entry);
+                },
+                &enum_error);
+
+            if (!walked) {
+                send_to_char(("Could not read the accounts directory: " + enum_error + "\n\r").c_str(), ch);
+                return;
+            }
+
+            const std::vector<std::string> disagreements = account_index::rebuild_report(records_on_disk);
+            if (disagreements.empty()) {
+                send_to_char("Index agrees with disk.\n\r", ch);
+                return;
+            }
+
+            for (const std::string& line : disagreements) {
+                sprintf(buf1, "  DRIFT %s\n\r", line.c_str());
+                send_to_char(buf1, ch);
+            }
+        }
+
         return;
     }
 

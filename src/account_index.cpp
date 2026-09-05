@@ -293,4 +293,34 @@ bool is_enabled()
     return g_enabled;
 }
 
+std::vector<std::string> rebuild_report(const std::vector<Entry>& records_on_disk)
+{
+    std::vector<std::string> disagreements;
+    std::unordered_set<std::string> seen;
+
+    for (const Entry& record : records_on_disk) {
+        seen.insert(record.normalized_email);
+        const auto indexed = g_entries.find(record.normalized_email);
+        if (indexed == g_entries.end()) {
+            disagreements.push_back("missing from index: " + record.normalized_email);
+            continue;
+        }
+        if (indexed->second.record_path != record.record_path) {
+            disagreements.push_back("path differs for " + record.normalized_email + ": index has "
+                + indexed->second.record_path + ", disk has " + record.record_path);
+        }
+        if (indexed->second.normalized_account_name != record.normalized_account_name) {
+            disagreements.push_back("account name differs for " + record.normalized_email + ": index has "
+                + indexed->second.normalized_account_name + ", disk has " + record.normalized_account_name);
+        }
+    }
+
+    for (const auto& indexed : g_entries) {
+        if (seen.find(indexed.first) == seen.end())
+            disagreements.push_back("in index but not on disk: " + indexed.first);
+    }
+
+    return disagreements;
+}
+
 } // namespace account_index

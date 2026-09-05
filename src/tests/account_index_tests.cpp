@@ -645,4 +645,40 @@ TEST_F(AccountIndexTest, QuarantinedAddressIsNotFreeForCreation)
         << "must not disclose that a record exists at this address: " << error_message;
 }
 
+TEST_F(AccountIndexTest, RebuildReportNamesEveryDisagreement)
+{
+    account_index::upsert(make_account("real@example.com", "real", { "Frodo" }),
+        "accounts/P-T/real@example.com/account.json");
+
+    // A record the live index knows about that a fresh scan would not produce.
+    account_index::upsert(make_account("ghost@example.com", "ghost", {}),
+        "accounts/F-J/ghost@example.com/account.json");
+
+    std::vector<account_index::Entry> on_disk;
+    account_index::Entry real_entry;
+    real_entry.normalized_email = "real@example.com";
+    real_entry.record_path = "accounts/P-T/real@example.com/account.json";
+    real_entry.normalized_account_name = "real";
+    on_disk.push_back(real_entry);
+
+    const std::vector<std::string> disagreements = account_index::rebuild_report(on_disk);
+    ASSERT_EQ(disagreements.size(), 1u);
+    EXPECT_NE(disagreements[0].find("ghost@example.com"), std::string::npos);
+}
+
+TEST_F(AccountIndexTest, RebuildReportIsEmptyWhenTheIndexAgrees)
+{
+    account_index::upsert(make_account("real@example.com", "real", { "Frodo" }),
+        "accounts/P-T/real@example.com/account.json");
+
+    std::vector<account_index::Entry> on_disk;
+    account_index::Entry real_entry;
+    real_entry.normalized_email = "real@example.com";
+    real_entry.record_path = "accounts/P-T/real@example.com/account.json";
+    real_entry.normalized_account_name = "real";
+    on_disk.push_back(real_entry);
+
+    EXPECT_TRUE(account_index::rebuild_report(on_disk).empty());
+}
+
 } // namespace
