@@ -777,8 +777,21 @@ namespace {
     {
         const std::string entry_path = bucket_path + "/" + account_entry.d_name;
         struct stat entry_info { };
-        if (stat(entry_path.c_str(), &entry_info) != 0)
+        if (stat(entry_path.c_str(), &entry_info) != 0) {
+            // ENOENT here means the entry readdir just handed us does not resolve to anything --
+            // in practice a dangling symlink, since stat() follows the link. That is litter, not a
+            // record, and it must say so with the sentinel every caller keys off. Returning false
+            // with error_message untouched made account_storage_contains_unreadable_records treat
+            // it as a record it could not read, which refuses EVERY new account with "Existing
+            // account records could not be read safely." -- permanently, with nothing quarantined,
+            // nothing logged, and `account index verify` reporting agreement.
+            //
+            // ENOENT ONLY. Any other stat failure (EACCES on a record we are not allowed to read,
+            // EIO, ELOOP) is a real record we cannot read, and must keep being reported as one.
+            if (errno == ENOENT)
+                set_error(error_message, "Entry is not an account record.");
             return false;
+        }
 
         if (S_ISDIR(entry_info.st_mode)) {
             const std::string account_json_path = entry_path + "/account.json";

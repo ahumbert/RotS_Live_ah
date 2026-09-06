@@ -3208,16 +3208,15 @@ ACMD(do_account)
             for (const std::string& claimant : contested.claimants) {
                 if (!claimants.empty())
                     claimants += ", ";
-                // A contested key has two claimants in every case anyone has ever seen; the cap is
-                // only here so a pathological tree cannot overrun buf1 through this sprintf.
-                if (claimants.length() > 512) {
-                    claimants += "...";
-                    break;
-                }
                 claimants += claimant;
             }
-            sprintf(buf1, "  CONTESTED %s '%s' claimed by: %s\n\r", contested.kind.c_str(),
-                contested.key.c_str(), claimants.c_str());
+            // snprintf, not sprintf: every field here is unbounded on principle -- the key is a
+            // character or account name off disk and the claimant list grows with the number of
+            // records disputing it -- and buf1 is a fixed MAX_STRING_LENGTH buffer. A contested key
+            // has two claimants in every case anyone has ever seen, so this truncates nothing in
+            // practice; it is here so the bound is real rather than asserted in a comment.
+            snprintf(buf1, MAX_STRING_LENGTH, "  CONTESTED %s '%s' claimed by: %s\n\r",
+                contested.kind.c_str(), contested.key.c_str(), claimants.c_str());
             send_to_char(buf1, ch);
         }
 

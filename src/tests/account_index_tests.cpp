@@ -1292,9 +1292,84 @@ TEST_F(AccountIndexTest, TheRecordEnumeratorSkipsNonRegularJsonEntries)
     ASSERT_EQ(visited.size(), 1u) << "litter must not be visited, or it counts as a bad record";
     EXPECT_NE(visited[0].find("real@example.com"), std::string::npos);
 
+    // The assertion that actually matters, and the reason the enumerator and
+    // read_account_file_from_bucket_entry have to agree on what a record is.
+    // account_storage_contains_unreadable_records walks every bucket entry through that reader and
+    // treats anything that fails WITHOUT the "Entry is not an account record." sentinel as a record
+    // it could not read -- which refuses EVERY new account. A dangling symlink is exactly that case
+    // (stat() follows the link and gets ENOENT), and once the enumerator stopped visiting it, it was
+    // no longer quarantined either, so neither escape hatch fired: registration was refused
+    // permanently, with nothing quarantined, nothing logged and `account index verify` reporting
+    // agreement. Pinning the enumerator's visit count alone does not see any of that.
+    account::AccountData newcomer;
+    std::string creation_error;
+    EXPECT_TRUE(account::create_account_for_email(root, "newcomer@example.com", "ValidPass1",
+        1700000001, &newcomer, &creation_error))
+        << "litter in a bucket must not refuse account creation: " << creation_error;
+
     // stat() cannot see through either of these, so the directory teardown skips them.
     unlink(dangling_path.c_str());
     unlink(fifo_path.c_str());
+}
+
+TEST_F(AccountIndexTest, ADanglingSymlinkInABucketDoesNotRefuseAccountCreation)
+{
+    // The same regression from the other side, with no index involved at all: this is the pure
+    // scan path (index disabled), which is the rollback behaviour and has to be correct on its own.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    ASSERT_EQ(mkdir((root + "/accounts").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((root + "/accounts/A-E").c_str(), 0700), 0);
+    const std::string dangling_path = root + "/accounts/A-E/broken-link.json";
+    ASSERT_EQ(symlink("no-such-target", dangling_path.c_str()), 0);
+
+    ASSERT_FALSE(account_index::is_enabled());
+    account::AccountData created;
+    std::string error_message;
+    EXPECT_TRUE(account::create_account_for_email(root, "arrival@example.com", "ValidPass1",
+        1700000002, &created, &error_message))
+        << error_message;
+    EXPECT_NE(error_message, "Existing account records could not be read safely.");
+
+    unlink(dangling_path.c_str());
+}
+
+TEST_F(AccountIndexTest, AnUnstatableRecordIsStillReportedAsUnreadable)
+{
+    // The other half of the sentinel rule, and the easier one to lose: only ENOENT means "not a
+    // record". A record we are not ALLOWED to stat is a real record we cannot read, and account
+    // creation must keep refusing rather than writing over it.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    ASSERT_EQ(mkdir((root + "/accounts").c_str(), 0700), 0);
+    const std::string bucket = root + "/accounts/A-E";
+    ASSERT_EQ(mkdir(bucket.c_str(), 0700), 0);
+    const std::string hidden_record = bucket + "/hidden";
+    ASSERT_EQ(mkdir(hidden_record.c_str(), 0700), 0);
+    // Search permission removed from the bucket: readdir still lists the entry, stat on it fails
+    // with EACCES.
+    ASSERT_EQ(chmod(bucket.c_str(), 0600), 0);
+
+    struct stat probe { };
+    const bool stat_is_blocked = stat(hidden_record.c_str(), &probe) != 0 && errno == EACCES;
+    if (!stat_is_blocked) {
+        // Running as root, where permissions do not bite. Nothing to assert.
+        chmod(bucket.c_str(), 0700);
+        GTEST_SKIP() << "stat() is not blocked for this user";
+    }
+
+    account::AccountData created;
+    std::string error_message;
+    EXPECT_FALSE(account::create_account_for_email(root, "arrival@example.com", "ValidPass1",
+        1700000003, &created, &error_message))
+        << "an unstatable entry is a record we cannot read, not litter";
+    EXPECT_EQ(error_message, "Existing account records could not be read safely.");
+
+    chmod(bucket.c_str(), 0700);
 }
 
 // --- The owner fast path does not re-read the record ---------------------------------------------
