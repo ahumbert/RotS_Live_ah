@@ -14,7 +14,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "account_cache.h"
+#include "account_index.h"
 #include "account_management.h"
+#include "account_management_storage.h"
 #include "char_utils.h"
 #include "color.h"
 #include "comm.h"
@@ -3168,7 +3171,114 @@ ACMD(do_account)
     half_chop(buf, account_identifier, value);
 
     if (!*subcommand) {
-        send_to_char("Usage: account <show|verify|unverify|block|unblock|passwd|addchar|migratechar|unlockselect> <email-or-account> [value]\n\r", ch);
+        send_to_char("Usage: account <show|verify|unverify|block|unblock|passwd|addchar|migratechar|unlockselect|index> <email-or-account> [value]\n\r", ch);
+        return;
+    }
+
+    if (!str_cmp(subcommand, "index")) {
+        char index_action[MAX_INPUT_LENGTH];
+        half_chop(buf, index_action, value);
+
+        // A diagnostic command's job is telling the truth about state -- silently treating an
+        // unrecognized word as the no-argument form would misreport a typo as "everything's fine".
+        if (*index_action && str_cmp(index_action, "on") && str_cmp(index_action, "off")
+            && str_cmp(index_action, "verify")) {
+            send_to_char("Usage: account index [verify|on|off]\n\r", ch);
+            return;
+        }
+
+        sprintf(buf1, "Account index: %lu record(s) indexed, %lu quarantined.\n\r",
+            static_cast<unsigned long>(account_index::size()),
+            static_cast<unsigned long>(account_index::quarantined_count()));
+        send_to_char(buf1, ch);
+
+        for (const account_index::Entry& entry : account_index::quarantined_entries()) {
+            sprintf(buf1, "  QUARANTINED %s (%s): %s\n\r", entry.normalized_email.c_str(),
+                entry.record_path.c_str(), entry.quarantine_reason.c_str());
+            send_to_char(buf1, ch);
+        }
+
+        if (!str_cmp(index_action, "on") || !str_cmp(index_action, "off")) {
+            // The spec's rollback story is "one setting, not a redeploy". Turning the index back ON
+            // is safe at any time only because it is maintained on every write regardless of this
+            // flag -- the flag governs whether the resolvers CONSULT it, never whether it is kept
+            // current (account_management_storage.cpp's write chokepoint calls account_index::upsert
+            // for every write against the index's own root). If that ever stops being true, this
+            // toggle would need to rebuild before it arms.
+            const bool enable = !str_cmp(index_action, "on");
+
+            // Turning the index off does not roll anything back while a quarantined record exists.
+            // The fallback the resolvers drop back to (find_character_owner_account,
+            // account_management.cpp:963-995) returns a hard failure for ANY record it cannot parse,
+            // and save_char (db.cpp:3269,3304) reacts to that by writing NOTHING for every
+            // account-native character -- a log line, no player-visible sign, and total progress
+            // loss until somebody reads the log. That scan's behaviour is the pre-branch behaviour
+            // and stays byte-identical; this is the toggle refusing to walk into it. `on` is always
+            // allowed: the index is the thing that tolerates a quarantined record.
+            if (!enable && account_index::quarantined_count() > 0) {
+                sprintf(buf1, "Refusing: %lu account record(s) are quarantined.\n\r",
+                    static_cast<unsigned long>(account_index::quarantined_count()));
+                send_to_char(buf1, ch);
+                send_to_char("With the index off, the directory scan fails on every one of them and\n\r", ch);
+                send_to_char("NO account-native character can save -- silently, to the log only.\n\r", ch);
+                send_to_char("Move the quarantined record(s) listed above out of accounts/ and reboot\n\r", ch);
+                send_to_char("first; the index can be turned off safely once none remain.\n\r", ch);
+                return;
+            }
+
+            account_index::set_enabled(enable);
+            // The cache memoizes both read_account_file and find_linked_character_owner_account
+            // outcomes, negative "not linked" answers included (account_cache.h), and is otherwise
+            // flushed only by a successful account write. Without this flush, every answer the index
+            // produced would survive the flip and keep being served -- and an immortal throws this
+            // switch precisely because they suspect those answers. Both directions: turning it ON
+            // must equally discard the scan's answers.
+            account_cache::invalidate_all();
+            sprintf(buf1, "Account index lookups are now %s.\n\r", enable ? "ON" : "OFF");
+            send_to_char(buf1, ch);
+            sprintf(buf1, "%s turned the account index %s.", GET_NAME(ch), enable ? "on" : "off");
+            mudlog(buf1, BRF, LEVEL_GRGOD, TRUE);
+            return;
+        }
+
+        if (!str_cmp(index_action, "verify")) {
+            std::vector<account_index::Entry> records_on_disk;
+            std::string enum_error;
+            const bool walked = account::for_each_account_record_on_disk(
+                ".",
+                [&records_on_disk](const account::AccountRecordOnDisk& record) {
+                    account_index::Entry entry;
+                    entry.record_path = record.record_path;
+                    // account_index_quarantine_key covers every case the boot walker keys a record
+                    // by (parsed or not, directory or legacy flat, mismatched or missing email
+                    // included) -- calling it unconditionally, with no record.parsed branch here, is
+                    // what keeps this in lockstep with whatever key account_index::quarantine() (or
+                    // upsert(), for a healthy record) actually used. Two independent derivations of
+                    // this rule is exactly how "verify" twice reported false drift for a quarantined
+                    // record that was really right there on disk.
+                    entry.normalized_email = account::account_index_quarantine_key(record);
+                    entry.normalized_account_name = account::normalize_account_name(record.account.account_name);
+                    records_on_disk.push_back(entry);
+                },
+                &enum_error);
+
+            if (!walked) {
+                send_to_char(("Could not read the accounts directory: " + enum_error + "\n\r").c_str(), ch);
+                return;
+            }
+
+            const std::vector<std::string> disagreements = account_index::rebuild_report(records_on_disk);
+            if (disagreements.empty()) {
+                send_to_char("Index agrees with disk.\n\r", ch);
+                return;
+            }
+
+            for (const std::string& line : disagreements) {
+                sprintf(buf1, "  DRIFT %s\n\r", line.c_str());
+                send_to_char(buf1, ch);
+            }
+        }
+
         return;
     }
 

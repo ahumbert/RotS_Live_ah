@@ -463,6 +463,18 @@ bool create_account(const std::string& root_directory, const std::string& accoun
     if (!is_valid_email(email, error_message))
         return false;
 
+    // The same guard create_account_for_email applies, deliberately duplicated rather than left to
+    // that one caller. This function is public header API, and the quarantine shape it protects
+    // against is one account_storage_contains_unreadable_records below cannot see: a record whose
+    // stored email disagrees with the directory it is filed under parses perfectly, so only the
+    // index knows it is unusable. Without this, a future direct caller would create a fresh account
+    // straight over a real player's record. Reached today only via create_account_for_email, whose
+    // own guard has already refused, so this changes no live behaviour.
+    if (account_index::is_enabled() && account_index::matches_root(root_directory) && account_index::is_quarantined(email)) {
+        set_error(error_message, "That email address cannot be used right now.");
+        return false;
+    }
+
     std::string storage_error;
     if (account_storage_contains_unreadable_records(root_directory, &storage_error)) {
         set_error(error_message, storage_error);
@@ -506,6 +518,16 @@ bool create_account_for_email(const std::string& root_directory, const std::stri
 {
     if (!is_valid_email(email, error_message))
         return false;
+
+    // A quarantined record's lookup below fails the same way an unused address does (see
+    // find_account_by_email_internal's nullptr error_message), which would otherwise read as "this
+    // address is free" and let a new account overwrite a real player's unparseable-but-real record.
+    // Guarded the same way as the resolver fast paths: the index only speaks for the tree it was
+    // built against.
+    if (account_index::is_enabled() && account_index::matches_root(root_directory) && account_index::is_quarantined(email)) {
+        set_error(error_message, "That email address cannot be used right now.");
+        return false;
+    }
 
     std::string storage_error;
     if (account_storage_contains_unreadable_records(root_directory, &storage_error)) {
@@ -904,6 +926,48 @@ bool find_linked_character_owner_account_uncached(const std::string& root_direct
 {
     if (!validate_identifier_for_path(character_name, "Character name", error_message))
         return false;
+
+    // Index fast path. The scan below (find_character_owner_account) stays as the rollback path and
+    // is what runs whenever the index is disabled, or when the caller's root_directory is not the
+    // tree the index was built against (its stored paths would belong to the wrong tree).
+    //
+    // The return convention here is the whole risk of this function and is taken verbatim from the
+    // scan: "resolved, and this character is linked to no account" is SUCCESS -- true, an empty
+    // owner name and an empty error -- while false means a genuine failure to resolve. The
+    // not-linked case is the common one (every save of an unlinked character), and account_cache
+    // memoizes it, so returning false for it would make ordinary saves look like errors.
+    if (account_index::is_enabled() && account_index::matches_root(root_directory)) {
+        if (owner_account_name == nullptr) {
+            set_error(error_message, "Owner-account output parameter must not be null.");
+            return false;
+        }
+
+        owner_account_name->clear();
+
+        std::string owner_email;
+        std::string index_error;
+        if (!account_index::find_owner_email_by_character(character_name, &owner_email, &index_error)) {
+            // The index reports the two outcomes apart by whether it set a message: empty means
+            // "no account owns this character" (the scan walks the whole tree, matches nothing and
+            // returns true with an empty owner); non-empty means the owning record exists but is
+            // quarantined, which the scan surfaces as a hard failure when the file will not parse.
+            if (!index_error.empty()) {
+                set_error(error_message, index_error);
+                return false;
+            }
+
+            set_error(error_message, "");
+            return true;
+        }
+
+        AccountData owner_account;
+        if (!read_account_file_by_email(root_directory, owner_email, &owner_account, error_message))
+            return false;
+
+        *owner_account_name = owner_account.account_name;
+        set_error(error_message, "");
+        return true;
+    }
 
     return find_character_owner_account(root_directory, character_name, owner_account_name, error_message);
 }

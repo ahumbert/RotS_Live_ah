@@ -3,6 +3,9 @@
 
 #include "account_management_types.h"
 
+#include <functional>
+#include <string>
+
 namespace account {
 
 std::string account_bucket_for_name(const std::string& name);
@@ -27,6 +30,46 @@ bool read_account_file_uncached(const std::string& root_directory, const std::st
 bool read_account_file_by_email(const std::string& root_directory, const std::string& email, AccountData* account, std::string* error_message = nullptr);
 bool read_account_file_by_identifier(const std::string& root_directory, const std::string& identifier, AccountData* account, std::string* error_message = nullptr);
 
+// One account record found on disk, in either supported layout.
+struct AccountRecordOnDisk {
+    // The bucket entry name: "<email>" for the directory layout, "<name>.json" for the legacy flat one.
+    std::string directory_entry_name;
+    // Full path of the JSON actually read.
+    std::string record_path;
+    // Whether the record parsed. When false, `account` is meaningless and failure_reason says why.
+    bool parsed = false;
+    // True when this record came from the directory layout (<email>/account.json), false for the
+    // legacy flat layout (<name>.json). Taken from stat(), not guessed from the entry name.
+    bool directory_layout = false;
+    AccountData account;
+    std::string failure_reason;
+};
+
+// Walks accounts/ and visits every record in either layout, parsed or not. Visits one record at a
+// time rather than returning them all: at boot this runs over every account on the box, and holding
+// every parsed AccountData at once would be a real memory spike on a machine that already swaps.
+// Returns false only when the accounts directory itself cannot be read; an individual bad record is
+// reported to the visitor with parsed == false, never as a failure of the walk.
+bool for_each_account_record_on_disk(const std::string& root_directory,
+    const std::function<void(const AccountRecordOnDisk&)>& visitor,
+    std::string* error_message = nullptr);
+
+// The key a record is (or should be) indexed/quarantined under, derived purely from the record
+// itself, covering every shape the boot walker (db.cpp) and `account index verify` (act_wiz.cpp)
+// use it for:
+//   - directory layout, parsed or not -> its entry name, which IS the email even when the file
+//     fails to parse (and even when the email INSIDE a parsed file disagrees with it -- the
+//     directory name is the one the record is actually filed under).
+//   - legacy flat, parsed, with a usable (non-empty) email -> that email.
+//   - legacy flat, parsed, with no usable email, or not parsed at all -> its own record path: it
+//     has revealed no email to key it by (either it never parsed, or it parsed to an empty one),
+//     and an unparseable/emailless flat record must not reserve an email it never disclosed.
+// Both callers must go through this one function with no local branching of their own -- two
+// independent derivations of this rule is what produced a false-drift bug in `account index verify`
+// twice. `directory_layout` comes straight from stat() in the enumerator, not guessed from the
+// entry name.
+std::string account_index_quarantine_key(const AccountRecordOnDisk& record);
+
 std::string serialize_character_migration_to_json(const CharacterMigrationData& migration);
 bool deserialize_character_migration_from_json(const std::string& json, CharacterMigrationData* migration, std::string* error_message = nullptr);
 
@@ -37,7 +80,7 @@ bool read_text_file(const std::string& path, std::string* contents, std::string*
 // Atomic write: temp(path+".tmp") -> fwrite -> rename. Exposed for stage-timing the SAVE
 // pipeline's disk-write step against a throwaway path.
 bool write_text_file_atomically(const std::string& path, const std::string& text,
-                                std::string* error_message);
+    std::string* error_message);
 
 } // namespace account
 

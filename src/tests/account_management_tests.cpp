@@ -1,3 +1,4 @@
+#include "../account_index.h"
 #include "../account_management.h"
 #include "../exploits_json.h"
 #include "../objects_json.h"
@@ -3610,7 +3611,8 @@ TEST_F(RosterCacheDropOnWriteTest, WritingACharacterFileDropsItsCachedRosterSumm
     account::AccountData account_data = make_account();
     std::string error_message;
     ASSERT_TRUE(account::create_account(".", account_data.account_name, account_data.normalized_email,
-        "ValidPass1", 1700010200, nullptr, &error_message)) << error_message;
+        "ValidPass1", 1700010200, nullptr, &error_message))
+        << error_message;
 
     char_file_u aragorn = make_stored_character("aragorn");
     aragorn.level = 10;
@@ -3653,7 +3655,7 @@ bool sortable_reader(const std::string& root_directory, const std::string&, cons
     char_file_u* stored_character, std::string* error_message)
 {
     EXPECT_EQ(root_directory, ".") << "reader invoked with an unexpected root directory -- selection and "
-                                       "rendering must resolve roster_cache entries against the same root";
+                                      "rendering must resolve roster_cache entries against the same root";
     *stored_character = char_file_u {};
     if (character_name == "gimli") {
         stored_character->level = 30;
@@ -3864,7 +3866,7 @@ TEST_F(RosterOrderTest, SideSortOrdersAlphabeticallyWithinEachSide)
             EXPECT_EQ(root_directory, ".");
             *stored_character = char_file_u {};
             if (character_name == "orczz" || character_name == "orcaa")
-                stored_character->race = RACE_ORC;   // dark
+                stored_character->race = RACE_ORC; // dark
             else
                 stored_character->race = RACE_HUMAN; // light
             if (error_message)
@@ -3959,7 +3961,8 @@ TEST_F(RosterOrderTest, ColumnPairingResetsAtEachSectionBoundary)
     const auto lights_it = std::find(lines.begin(), lines.end(), "-- Lights --");
     ASSERT_NE(lights_it, lines.end()) << prompt;
     const size_t lights = static_cast<size_t>(lights_it - lines.begin());
-    ASSERT_LE(lights + 7, lines.size() - 1) << "prompt is shorter than expected:\n" << prompt;
+    ASSERT_LE(lights + 7, lines.size() - 1) << "prompt is shorter than expected:\n"
+                                            << prompt;
 
     // Lights section (3 rows, odd): row 1 starts a fresh line right after the header, paired with
     // row 2; row 3 (the odd one out) is alone on its own line, itself properly terminated (not left
@@ -3991,7 +3994,8 @@ TEST_F(RosterOrderTest, ColumnPairingResetsAtEachSectionBoundary)
     // count (5, odd) rather than the actual trailing column parity (2, even) would insert a spurious
     // extra blank line here.
     EXPECT_EQ(lines[lights + 6], "") << prompt;
-    EXPECT_NE(lines[lights + 7], "") << "an extra blank line was emitted after the final pair:\n" << prompt;
+    EXPECT_NE(lines[lights + 7], "") << "an extra blank line was emitted after the final pair:\n"
+                                     << prompt;
     EXPECT_NE(lines[lights + 7].find("characters displayed."), std::string::npos) << prompt;
 }
 
@@ -4049,13 +4053,11 @@ TEST_F(RosterOrderTest, UnreadableCharactersSortLastAndAreExcludedByFilters)
     account_data.characters.insert(account_data.characters.begin(), "brokenchar");
 
     // sortable_reader returns false for "brokenchar".
-    const std::vector<std::string> by_level =
-        names_in_order(account_data, account::RosterSort::Level, account::RosterFilter::None);
+    const std::vector<std::string> by_level = names_in_order(account_data, account::RosterSort::Level, account::RosterFilter::None);
     ASSERT_EQ(by_level.size(), 5u);
     EXPECT_EQ(by_level.back(), "brokenchar");
 
-    const std::vector<std::string> warriors =
-        names_in_order(account_data, account::RosterSort::Account, account::RosterFilter::Warrior);
+    const std::vector<std::string> warriors = names_in_order(account_data, account::RosterSort::Account, account::RosterFilter::Warrior);
     EXPECT_EQ(warriors, (std::vector<std::string> { "gimli" }));
 }
 
@@ -4099,7 +4101,8 @@ TEST_F(RosterOrderTest, UnreadableCharacterRendersUnderUnavailableNotASecondGods
 
     const std::vector<std::pair<int, std::string>> rows = parse_rendered_roster_rows(prompt);
     ASSERT_EQ(rows.size(), 2u);
-    EXPECT_EQ(rows[0].second, "Godone") << "readable god-race character must render first, under Gods:\n" << prompt;
+    EXPECT_EQ(rows[0].second, "Godone") << "readable god-race character must render first, under Gods:\n"
+                                        << prompt;
     EXPECT_EQ(rows[1].second, "Brokenchar")
         << "unreadable character must render last, under Unavailable:\n"
         << prompt;
@@ -4109,8 +4112,10 @@ TEST_F(RosterOrderTest, UnreadableCharacterRendersUnderUnavailableNotASecondGods
     const size_t brokenchar_row = prompt.find("Brokenchar");
     ASSERT_NE(godone_row, std::string::npos);
     ASSERT_NE(brokenchar_row, std::string::npos);
-    EXPECT_LT(godone_row, unavailable) << "Godone must render before the Unavailable section:\n" << prompt;
-    EXPECT_GT(brokenchar_row, unavailable) << "Brokenchar must render after the Unavailable header:\n" << prompt;
+    EXPECT_LT(godone_row, unavailable) << "Godone must render before the Unavailable section:\n"
+                                       << prompt;
+    EXPECT_GT(brokenchar_row, unavailable) << "Brokenchar must render after the Unavailable header:\n"
+                                           << prompt;
 }
 
 // Names are character1..character250. Lexicographically "character250" < "character3" (the digit
@@ -4182,7 +4187,9 @@ TEST_F(RosterOrderTest, OrderingIsCappedAfterFiltering)
     roster_cache::clear();
 
     EXPECT_EQ(account::ordered_roster_indices(".", account_data,
-                  account::RosterSort::Account, account::RosterFilter::Warrior).size(), 200u);
+                  account::RosterSort::Account, account::RosterFilter::Warrior)
+                  .size(),
+        200u);
 }
 
 // The PR #289 invariant, generalised: whatever row N shows must be what typing N selects, under
@@ -4264,8 +4271,7 @@ TEST_F(RosterOrderTest, SelectionByNameFindsACharacterPastTheInsertionOrderCapUn
         });
     roster_cache::clear();
 
-    const std::vector<std::string> displayed =
-        names_in_order(account_data, account::RosterSort::Name, account::RosterFilter::None);
+    const std::vector<std::string> displayed = names_in_order(account_data, account::RosterSort::Name, account::RosterFilter::None);
     ASSERT_EQ(displayed.size(), 200u);
     ASSERT_EQ(displayed.front(), "aaearly") << "test setup: expected the out-of-order character to sort first";
 
@@ -4373,4 +4379,96 @@ TEST(AccountManagement, AccountJsonWithoutRosterSortLoadsWithInsertionOrder)
     account::RosterSort sort = account::RosterSort::Name;
     ASSERT_TRUE(account::roster_sort_from_string(parsed_account.roster_sort, &sort));
     EXPECT_EQ(sort, account::RosterSort::Account);
+}
+
+TEST(AccountManagement, WriteAccountFileIndexesTheRecord)
+{
+    account_index::clear();
+
+    TemporaryDirectory temp_directory;
+    // write_account_file only indexes a record written against the index's own root -- the write
+    // side of the same matches_root() guard the resolvers apply. Without declaring the root, the
+    // upsert is (correctly) skipped and the assertions below would be pinning the gap instead of the
+    // behaviour. account_index::clear() puts the root back to "." for whatever runs next.
+    account_index::set_root_directory(temp_directory.path());
+    account::AccountData account_data;
+    std::string error_message;
+    ASSERT_TRUE(account::initialize_new_account("indexed", "indexed@example.com", "Password123", 1000, &account_data, &error_message)) << error_message;
+    ASSERT_TRUE(account::write_account_file(temp_directory.path(), account_data, &error_message)) << error_message;
+
+    std::string path;
+    EXPECT_TRUE(account_index::find_path_by_email("indexed@example.com", &path, nullptr));
+    EXPECT_TRUE(account_index::find_path_by_account_name("indexed", &path, nullptr));
+
+    account_index::clear();
+}
+
+TEST(AccountManagement, WriteAccountFileIndexesNewlyLinkedCharacters)
+{
+    account_index::clear();
+
+    TemporaryDirectory temp_directory;
+    account_index::set_root_directory(temp_directory.path());
+    account::AccountData account_data;
+    std::string error_message;
+    ASSERT_TRUE(account::initialize_new_account("linker", "linker@example.com", "Password123", 1000, &account_data, &error_message)) << error_message;
+    ASSERT_TRUE(account::add_character_to_account(&account_data, "Frodo", &error_message)) << error_message;
+    ASSERT_TRUE(account::write_account_file(temp_directory.path(), account_data, &error_message)) << error_message;
+
+    std::string owner_email;
+    ASSERT_TRUE(account_index::find_owner_email_by_character("Frodo", &owner_email, nullptr));
+    EXPECT_EQ(owner_email, "linker@example.com");
+
+    account_index::clear();
+}
+
+TEST(AccountManagement, AWriteRejectedBeforeAnyFileWorkLeavesTheIndexAlone)
+{
+    account_index::clear();
+
+    TemporaryDirectory temp_directory;
+    account_index::set_root_directory(temp_directory.path());
+    account::AccountData account_data;
+    std::string error_message;
+    ASSERT_TRUE(account::initialize_new_account("failer", "failer@example.com", "Password123", 1000, &account_data, &error_message)) << error_message;
+    account_data.account_name = ""; // rejected by validate_identifier_for_path before any file work
+
+    EXPECT_FALSE(account::write_account_file(temp_directory.path(), account_data, &error_message));
+
+    std::string path;
+    EXPECT_FALSE(account_index::find_path_by_email("failer@example.com", &path, nullptr))
+        << "a write that never landed must never appear in the index";
+
+    account_index::clear();
+}
+
+TEST(AccountManagement, AWriteThatFailsAfterReachingDiskLeavesTheIndexAlone)
+{
+    // The companion to the test above, and the one that exercises the ordering that matters: this
+    // write creates the account/bucket directories and opens its temp file before failing on the
+    // occupied-target check, so an upsert placed anywhere but after the rename would already have
+    // fired. The early-validation case never reaches file work at all.
+    account_index::clear();
+
+    TemporaryDirectory temp_directory;
+    account_index::set_root_directory(temp_directory.path());
+
+    account::AccountData occupier;
+    std::string error_message;
+    ASSERT_TRUE(account::initialize_new_account("occupier", "shared@example.com", "Password123", 1000, &occupier, &error_message)) << error_message;
+    ASSERT_TRUE(account::write_account_file(temp_directory.path(), occupier, &error_message)) << error_message;
+
+    account::AccountData intruder;
+    ASSERT_TRUE(account::initialize_new_account("intruder", "shared@example.com", "Password123", 1000, &intruder, &error_message)) << error_message;
+    EXPECT_FALSE(account::write_account_file(temp_directory.path(), intruder, &error_message))
+        << "the target path is already held by a different account";
+    EXPECT_EQ(error_message, "Account storage path is already occupied by a different account.");
+
+    std::string path;
+    EXPECT_FALSE(account_index::find_path_by_account_name("intruder", &path, nullptr))
+        << "a write that never landed must never appear in the index";
+    EXPECT_TRUE(account_index::find_path_by_account_name("occupier", &path, nullptr))
+        << "and it must not disturb the record that is really there";
+
+    account_index::clear();
 }

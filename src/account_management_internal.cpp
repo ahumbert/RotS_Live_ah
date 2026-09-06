@@ -25,25 +25,41 @@ namespace {
         return nullptr;
     }
 
+    // The account directory for a record we are already holding. account_character_directory() takes
+    // an account NAME and resolves it back to the record's email (a read, or an index lookup) purely
+    // to learn a string this record already carries; that round trip is what made the boot walker
+    // resolve through the index while the index was still being built. The result is identical:
+    // resolve_account_storage_key returns normalize_email() of the record it reads, which is exactly
+    // what is used here, and the "" case maps to the same __invalid_account__ path.
+    std::string account_record_directory(const std::string& root_directory, const AccountData& account)
+    {
+        const std::string account_storage_key = normalize_email(account.normalized_email);
+        if (account_storage_key.empty())
+            return root_directory + "/accounts/__invalid_account__";
+        return account_directory_path_from_email(root_directory, account_storage_key);
+    }
+
     std::string resolved_character_path(const AccountData& account, const std::string& root_directory, const std::string& character_name)
     {
-        return account_character_player_path(root_directory, account.account_name, character_name);
+        return account_record_directory(root_directory, account) + "/" + character_json_file_name(character_name);
     }
 
     std::string resolved_object_path(const AccountData& account, const std::string& root_directory, const std::string& character_name)
     {
+        const std::string account_directory = account_record_directory(root_directory, account);
         const CharacterLinkReference* link = find_character_link_reference(account, character_name);
         if (link != nullptr && !link->object_path.empty())
-            return account_character_directory(root_directory, account.account_name, character_name) + "/" + link->object_path;
-        return account_character_object_path(root_directory, account.account_name, character_name);
+            return account_directory + "/" + link->object_path;
+        return account_directory + "/" + objects_json_file_name(character_name);
     }
 
     std::string resolved_exploits_path(const AccountData& account, const std::string& root_directory, const std::string& character_name)
     {
+        const std::string account_directory = account_record_directory(root_directory, account);
         const CharacterLinkReference* link = find_character_link_reference(account, character_name);
         if (link != nullptr && !link->exploits_path.empty())
-            return account_character_directory(root_directory, account.account_name, character_name) + "/" + link->exploits_path;
-        return account_character_exploits_path(root_directory, account.account_name, character_name);
+            return account_directory + "/" + link->exploits_path;
+        return account_directory + "/" + exploits_json_file_name(character_name);
     }
 
     std::string safe_relative_object_path_or_empty(const std::string& object_path, const std::string& expected_basename)

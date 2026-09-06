@@ -1,5 +1,6 @@
 #include "account_management.h"
 #include "account_cache.h"
+#include "account_index.h"
 #include "character_json.h"
 #include "exploits_json.h"
 #include "json_utils.h"
@@ -752,6 +753,19 @@ namespace {
         if (!validate_identifier_for_path(account_identifier, "Account name", nullptr))
             return "";
 
+        // Index fast path: the storage key is the email that keys the record, which the index
+        // already holds. Deliberately NOT parsed back out of the record path -- for a legacy flat
+        // record (accounts/<bucket>/<name>.json) the parent directory is the bucket, so that would
+        // silently yield "A-E" as an account's storage key. Guarded on the root the index was built
+        // against: its paths and keys are meaningful only for that tree, so any other root falls
+        // through to the scan below.
+        if (account_index::is_enabled() && account_index::matches_root(root_directory)) {
+            std::string storage_key;
+            if (!account_index::find_email_by_account_name(account_identifier, &storage_key, nullptr))
+                return "";
+            return storage_key;
+        }
+
         AccountData stored_account;
         if (read_account_file(root_directory, account_identifier, &stored_account, nullptr))
             return normalize_email(stored_account.normalized_email);
@@ -802,6 +816,22 @@ namespace {
         if (account_path == nullptr) {
             set_error(error_message, "Account-path output parameter must not be null.");
             return false;
+        }
+
+        // Index fast path. The scan below stays as the rollback path for one release; it runs
+        // whenever the index is disabled (the test binary, and any build that turns it off) or when
+        // the caller is working against a tree other than the one the index was built for.
+        // account_index::find_path_by_account_name reproduces this function's not-found text
+        // verbatim, and the path it returns may end in "<name>.json" for a legacy flat record --
+        // exactly as the scan's own directory-over-flat precedence would return it.
+        if (account_index::is_enabled() && account_index::matches_root(root_directory)) {
+            std::string indexed_path;
+            if (!account_index::find_path_by_account_name(account_name, &indexed_path, error_message))
+                return false;
+
+            *account_path = indexed_path;
+            set_error(error_message, "");
+            return true;
         }
 
         const std::string normalized_account_name = normalize_account_name(account_name);
@@ -970,6 +1000,19 @@ namespace {
             return false;
         }
 
+        // Index fast path -- this is the change that removes the full accounts/ scan from every
+        // login. The record itself is still read from disk (the index holds keys only), and
+        // read_account_file_from_path handles both on-disk layouts, so a legacy flat path needs no
+        // special casing. The unknown-email text matches this function's own below verbatim;
+        // interpre.cpp string-compares against it. Falls through to the scan for a root the index
+        // was not built against.
+        if (account_index::is_enabled() && account_index::matches_root(root_directory)) {
+            std::string indexed_path;
+            if (!account_index::find_path_by_email(email, &indexed_path, error_message))
+                return false;
+            return read_account_file_from_path(indexed_path, account, error_message);
+        }
+
         const std::string normalized_email = normalize_email(email);
         const std::string accounts_directory = root_directory + "/accounts";
         DIR* accounts_dir = opendir(accounts_directory.c_str());
@@ -1051,6 +1094,22 @@ namespace {
         return false;
     }
 
+    // The index key a bucket entry that FAILED to parse is (or would be) filed under. Expressed
+    // through account_index_quarantine_key rather than restating its rule: for the directory layout
+    // the key is the entry name, for a legacy flat file it is the file's own path -- and an unparsed
+    // record discloses no email, so neither shape needs the record read. `record_path` is composed
+    // exactly as for_each_account_record_on_disk composes it for a flat candidate; the directory
+    // shape never consults it.
+    std::string account_index_key_for_unparsed_bucket_entry(const std::string& bucket_path, const dirent& account_entry)
+    {
+        AccountRecordOnDisk record;
+        record.directory_entry_name = account_entry.d_name;
+        record.record_path = bucket_path + "/" + account_entry.d_name;
+        record.directory_layout = is_directory_bucket_entry(bucket_path, account_entry);
+        record.parsed = false;
+        return account_index_quarantine_key(record);
+    }
+
     bool account_storage_contains_unreadable_records(const std::string& root_directory, std::string* error_message)
     {
         const std::string accounts_directory = root_directory + "/accounts";
@@ -1090,6 +1149,20 @@ namespace {
                 if (!read_account_file_from_bucket_entry(bucket_path, *account_entry, &stored_account, &read_error)) {
                     if (read_error == "Entry is not an account record.")
                         continue;
+
+                    // A record the index already quarantined is a known-bad record the game has
+                    // deliberately chosen to run with: boot logged it, counted it, reserved its
+                    // email against exactly the overwrite this function guards, and refused to
+                    // continue at all past MAX_QUARANTINED_RECORDS_AT_BOOT. Reporting it here as
+                    // well would stop EVERY player from creating an account until an operator
+                    // noticed one bad file -- the whole outcome quarantine exists to avoid. Behaviour
+                    // is unchanged when the index is off or belongs to another tree: it is then not
+                    // an authority on what is known-bad, and this stays the pre-branch scan.
+                    if (account_index::is_enabled() && account_index::matches_root(root_directory)
+                        && account_index::is_quarantined_record_key(
+                            account_index_key_for_unparsed_bucket_entry(bucket_path, *account_entry)))
+                        continue;
+
                     closedir(bucket_dir);
                     closedir(accounts_dir);
                     set_error(error_message, "Existing account records could not be read safely.");
@@ -1702,10 +1775,15 @@ bool write_text_file_atomically(const std::string& path, const std::string& text
 
 // Keep the internal helper fragment before the public fragments. The split is
 // intentionally low-risk and still shares one translation unit for now.
+// clang-format off
+// Order is load-bearing: these fragments are textually included into this TU and each one uses
+// helpers defined by the ones above it. clang-format sorts include blocks alphabetically, which
+// reorders them into a build break -- hence the guard.
 #include "account_management_internal.cpp"
 #include "account_management_identity.cpp"
 #include "account_management_storage.cpp"
 #include "account_management_assets.cpp"
+// clang-format on
 
 namespace {
 
@@ -1732,7 +1810,9 @@ namespace {
 
 } // namespace
 
+// clang-format off
 #include "account_management_migration.cpp"
 #include "account_management_presentation.cpp"
+// clang-format on
 
 } // namespace account

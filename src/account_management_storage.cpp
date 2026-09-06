@@ -253,6 +253,19 @@ bool write_account_file(const std::string& root_directory, const AccountData& ac
     if (account_cache::is_enabled())
         account_cache::invalidate_all();
 
+    // Same chokepoint, same condition: after the rename, only on a fully successful write. The
+    // index re-derives every key from the record just written, so link, unlink, rename and an
+    // account-name change are all handled without diffing against what was there before.
+    //
+    // Root-guarded, the other half of the resolvers' matches_root() guard: final_path was composed
+    // against THIS caller's root, and the index holds paths for one tree only. Indexing a foreign
+    // root's path would leave lookups against the real (".") tree serving a path into that other
+    // tree. Deliberately NOT gated on is_enabled(): the index is maintained on every write whether
+    // or not the resolvers currently consult it, which is what lets `account index on` arm
+    // immediately instead of having to rebuild (act_wiz.cpp's toggle relies on this).
+    if (account_index::matches_root(root_directory))
+        account_index::upsert(normalized_account, final_path);
+
     set_error(error_message, "");
     return true;
 }
@@ -298,6 +311,102 @@ bool read_account_file_by_identifier(const std::string& root_directory, const st
         return read_account_file_by_email(root_directory, identifier, account, error_message);
 
     return read_account_file(root_directory, identifier, account, error_message);
+}
+
+bool for_each_account_record_on_disk(const std::string& root_directory,
+    const std::function<void(const AccountRecordOnDisk&)>& visitor,
+    std::string* error_message)
+{
+    const std::string accounts_directory = root_directory + "/accounts";
+    DIR* accounts_dir = opendir(accounts_directory.c_str());
+    if (accounts_dir == nullptr) {
+        set_error(error_message, "Failed to open accounts directory '" + accounts_directory + "': " + std::strerror(errno));
+        return false;
+    }
+
+    while (dirent* bucket_entry = readdir(accounts_dir)) {
+        // Skip "." / ".." and any other hidden entry (e.g. a stray .DS_Store or editor swap file) --
+        // this mirrors the boot walker this function replaces, which never treated a dotfile bucket
+        // as an account record to report.
+        if (bucket_entry->d_name[0] == '.')
+            continue;
+
+        const std::string bucket_path = accounts_directory + "/" + bucket_entry->d_name;
+        struct stat bucket_info { };
+        if (stat(bucket_path.c_str(), &bucket_info) != 0 || !S_ISDIR(bucket_info.st_mode))
+            continue;
+
+        DIR* bucket_dir = opendir(bucket_path.c_str());
+        if (bucket_dir == nullptr)
+            continue;
+
+        while (dirent* account_entry = readdir(bucket_dir)) {
+            if (account_entry->d_name[0] == '.')
+                continue;
+
+            const std::string entry_path = bucket_path + "/" + account_entry->d_name;
+            const bool is_directory_entry = is_directory_bucket_entry(bucket_path, *account_entry);
+
+            // Only visit genuine CANDIDATE records: a directory whose account.json exists, or a
+            // regular file whose name ends in ".json". Everything else is filesystem litter, not an
+            // account record -- most notably a directory with no account.json yet, which is a normal
+            // transient artifact (write_account_file creates the account directory before it writes
+            // the temp file, so a crash between those two steps leaves one behind). Litter must not
+            // be visited at all, so it never counts against MAX_QUARANTINED_RECORDS_AT_BOOT. A
+            // candidate that then fails to parse still gets visited with parsed == false below.
+            std::string candidate_record_path;
+            if (is_directory_entry) {
+                const std::string account_json_path = entry_path + "/account.json";
+                struct stat account_json_info { };
+                if (stat(account_json_path.c_str(), &account_json_info) != 0)
+                    continue;
+                candidate_record_path = account_json_path;
+            } else {
+                const std::string file_name = account_entry->d_name;
+                if (!(file_name.length() >= 6 && file_name.compare(file_name.length() - 5, 5, ".json") == 0))
+                    continue;
+                candidate_record_path = entry_path;
+            }
+
+            AccountRecordOnDisk record;
+            record.directory_entry_name = account_entry->d_name;
+            record.record_path = candidate_record_path;
+            record.directory_layout = is_directory_entry;
+
+            AccountData parsed_account;
+            std::string read_error;
+            if (read_account_file_from_bucket_entry(bucket_path, *account_entry, &parsed_account, &read_error)) {
+                record.parsed = true;
+                record.account = std::move(parsed_account);
+            } else {
+                record.parsed = false;
+                record.failure_reason = read_error;
+            }
+
+            visitor(record);
+        }
+
+        closedir(bucket_dir);
+    }
+
+    closedir(accounts_dir);
+    set_error(error_message, "");
+    return true;
+}
+
+std::string account_index_quarantine_key(const AccountRecordOnDisk& record)
+{
+    if (record.directory_layout)
+        return record.directory_entry_name;
+    if (record.parsed) {
+        // A parsed legacy flat record is keyed by its own email UNLESS that email is empty (the
+        // "no usable email address" case, db.cpp), in which case it has revealed nothing to key it
+        // by and falls through to record_path below, exactly like the unparsed case.
+        const std::string email = normalize_email(record.account.normalized_email);
+        if (!email.empty())
+            return email;
+    }
+    return record.record_path;
 }
 
 std::string account_character_directory(const std::string& root_directory, const std::string& account_name, const std::string&)
