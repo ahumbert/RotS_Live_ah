@@ -706,22 +706,33 @@ namespace {
                 const std::string read_error = error_message;
                 bool account_character_exists = false;
                 std::string inspect_error;
+                // A per-character asset failure is NOT the account's failure. The account.json we
+                // are walking parsed perfectly well; one of the character files it points at did
+                // not. Quarantining here would erase the account's keys and reserve its email, which
+                // locks the player out of every OTHER character they own and refuses their address
+                // for account creation -- over a file that has nothing to do with the record's own
+                // integrity. And it is reachable: one unknown skill/slot/flag NAME rejects an entire
+                // character file in this codebase, so a single legacy character would take its
+                // owner's whole account down with it.
+                //
+                // So this is treated exactly as the !account_character_exists case just below
+                // already is: log it and go on to the next character. Only a failure of account.json
+                // ITSELF quarantines the account. The log line is the only evidence that this
+                // character did not make it into player_table, so it stays.
                 if (!account::inspect_account_character_file_from_record(".", record.account, character_name, &account_character_exists, &inspect_error)) {
-                    sprintf(buf, "Failed to inspect account-native character file '%s': %s",
-                        character_path.c_str(), inspect_error.c_str());
+                    sprintf(buf, "Failed to inspect account-native character file '%s': %s (account '%s' stays usable; this character is not in the player index)",
+                        character_path.c_str(), inspect_error.c_str(), record.record_path.c_str());
                     log(buf);
-                    account_index::quarantine(account::account_index_quarantine_key(record), record.record_path, buf);
-                    return;
+                    continue;
                 }
 
                 if (!account_character_exists)
                     continue;
 
-                sprintf(buf, "Failed to read account-native character file '%s': %s",
-                    character_path.c_str(), read_error.c_str());
+                sprintf(buf, "Failed to read account-native character file '%s': %s (account '%s' stays usable; this character is not in the player index)",
+                    character_path.c_str(), read_error.c_str(), record.record_path.c_str());
                 log(buf);
-                account_index::quarantine(account::account_index_quarantine_key(record), record.record_path, buf);
-                return;
+                continue;
             }
 
             populate_player_index_entry_from_store(stored_character, character_path);
