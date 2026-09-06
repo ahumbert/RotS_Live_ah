@@ -345,7 +345,17 @@ bool for_each_account_record_on_disk(const std::string& root_directory,
                 continue;
 
             const std::string entry_path = bucket_path + "/" + account_entry->d_name;
-            const bool is_directory_entry = is_directory_bucket_entry(bucket_path, *account_entry);
+            // One stat, two decisions. is_directory_bucket_entry() would stat this same entry for
+            // the directory question and then the ".json" suffix test below would have decided the
+            // regular-file question without stat-ing at all -- which is how a non-regular ".json"
+            // entry (a dangling symlink, a fifo) used to get through: visited as a candidate here,
+            // then rejected inside read_account_file_from_bucket_entry, which tests
+            // S_ISREG && suffix. Keeping both walkers' idea of "what is even a record" identical is
+            // the point; see the S_ISREG test in the else branch below.
+            struct stat entry_info { };
+            if (stat(entry_path.c_str(), &entry_info) != 0)
+                continue;
+            const bool is_directory_entry = S_ISDIR(entry_info.st_mode);
 
             // Only visit genuine CANDIDATE records: a directory whose account.json exists, or a
             // regular file whose name ends in ".json". Everything else is filesystem litter, not an
@@ -362,7 +372,15 @@ bool for_each_account_record_on_disk(const std::string& root_directory,
                     continue;
                 candidate_record_path = account_json_path;
             } else {
+                // S_ISREG, not merely "not a directory": read_account_file_from_bucket_entry reads
+                // only regular files, so without this a dangling symlink or a fifo named "x.json"
+                // would be visited as a candidate, fail inside that reader, and be quarantined --
+                // counting against MAX_QUARANTINED_RECORDS_AT_BOOT, six of them refusing a boot,
+                // over filesystem litter that account_storage_contains_unreadable_records does not
+                // consider a record at all.
                 const std::string file_name = account_entry->d_name;
+                if (!S_ISREG(entry_info.st_mode))
+                    continue;
                 if (!(file_name.length() >= 6 && file_name.compare(file_name.length() - 5, 5, ".json") == 0))
                     continue;
                 candidate_record_path = entry_path;
@@ -380,7 +398,11 @@ bool for_each_account_record_on_disk(const std::string& root_directory,
                 record.account = std::move(parsed_account);
             } else {
                 record.parsed = false;
-                record.failure_reason = read_error;
+                // Never an empty reason. The reader can return false without setting a message (a
+                // stat that fails between our stat above and its own), and an empty reason becomes a
+                // log line and a wizard "QUARANTINED <path>: " line that trail off into nothing --
+                // the one piece of evidence about a record we refused, with the evidence missing.
+                record.failure_reason = read_error.empty() ? "Account record could not be read." : read_error;
             }
 
             visitor(record);

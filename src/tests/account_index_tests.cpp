@@ -1027,4 +1027,330 @@ TEST_F(AccountIndexTest, CreateAccountItselfRefusesAQuarantinedAddress)
         << "must not disclose that a record exists at this address: " << error_message;
 }
 
+// --- Contention lowers again --------------------------------------------------------------------
+// Raising a refusal that only a reboot can clear is its own outage: a contested character key makes
+// save_char write NOTHING for that character, silently and to the log only. Repairing the duplicate
+// on disk and writing the repaired record has to be enough.
+
+TEST_F(AccountIndexTest, UnlinkingACharacterFromOneRecordClearsTheContention)
+{
+    account_index::upsert(make_account("first@example.com", "first", { "Bob" }),
+        "accounts/A-E/first@example.com/account.json");
+    account_index::upsert(make_account("second@example.com", "second", { "Bob" }),
+        "accounts/P-T/second@example.com/account.json");
+    ASSERT_TRUE(account_index::is_character_ambiguous("Bob"));
+
+    // The repair: the second record no longer lists Bob, and is written.
+    account_index::upsert(make_account("second@example.com", "second", {}),
+        "accounts/P-T/second@example.com/account.json");
+
+    EXPECT_FALSE(account_index::is_character_ambiguous("Bob"))
+        << "the flag must lower, or saves stay broken until the next reboot";
+
+    std::string owner_email;
+    std::string error_message = "sentinel";
+    ASSERT_TRUE(account_index::find_owner_email_by_character("Bob", &owner_email, &error_message))
+        << error_message;
+    EXPECT_EQ(owner_email, "first@example.com") << "the surviving claimant must resolve";
+}
+
+TEST_F(AccountIndexTest, AThirdClaimantKeepsACharacterContestedUntilOnlyOneRemains)
+{
+    account_index::upsert(make_account("a@example.com", "aaa", { "Bob" }), "accounts/A-E/a@example.com/account.json");
+    account_index::upsert(make_account("b@example.com", "bbb", { "Bob" }), "accounts/A-E/b@example.com/account.json");
+    account_index::upsert(make_account("c@example.com", "ccc", { "Bob" }), "accounts/A-E/c@example.com/account.json");
+    ASSERT_TRUE(account_index::is_character_ambiguous("Bob"));
+
+    account_index::upsert(make_account("c@example.com", "ccc", {}), "accounts/A-E/c@example.com/account.json");
+    EXPECT_TRUE(account_index::is_character_ambiguous("Bob"))
+        << "two claimants are still two claimants";
+
+    account_index::upsert(make_account("b@example.com", "bbb", {}), "accounts/A-E/b@example.com/account.json");
+    EXPECT_FALSE(account_index::is_character_ambiguous("Bob"));
+
+    std::string owner_email;
+    ASSERT_TRUE(account_index::find_owner_email_by_character("Bob", &owner_email, nullptr));
+    EXPECT_EQ(owner_email, "a@example.com");
+}
+
+TEST_F(AccountIndexTest, RenamingOneOfTwoAccountsClearsTheContestedName)
+{
+    account_index::upsert(make_account("first@example.com", "shared", {}),
+        "accounts/A-E/first@example.com/account.json");
+    account_index::upsert(make_account("second@example.com", "shared", {}),
+        "accounts/P-T/second@example.com/account.json");
+    ASSERT_TRUE(account_index::is_account_name_ambiguous("shared"));
+
+    account_index::upsert(make_account("second@example.com", "unshared", {}),
+        "accounts/P-T/second@example.com/account.json");
+
+    EXPECT_FALSE(account_index::is_account_name_ambiguous("shared"));
+
+    std::string path;
+    ASSERT_TRUE(account_index::find_path_by_account_name("shared", &path, nullptr));
+    EXPECT_EQ(path, "accounts/A-E/first@example.com/account.json")
+        << "the record that kept the name must own it again";
+    ASSERT_TRUE(account_index::find_path_by_account_name("unshared", &path, nullptr));
+    EXPECT_EQ(path, "accounts/P-T/second@example.com/account.json");
+}
+
+TEST_F(AccountIndexTest, TwoRecordsAtOneAddressStopBeingAmbiguousOnceTheirNamesAgree)
+{
+    account_index::upsert(make_account("shared@example.com", "aaa", {}),
+        "accounts/P-T/aaa.json", /*legacy_flat_layout=*/true);
+    account_index::upsert(make_account("shared@example.com", "bbb", {}),
+        "accounts/P-T/bbb.json", /*legacy_flat_layout=*/true);
+    ASSERT_TRUE(account_index::is_email_ambiguous("shared@example.com"));
+
+    // The repair for an address: the two records stop disagreeing about the account name, which is
+    // exactly find_account_by_email_internal's own duplicate test.
+    account_index::upsert(make_account("shared@example.com", "aaa", {}),
+        "accounts/P-T/bbb.json", /*legacy_flat_layout=*/true);
+
+    EXPECT_FALSE(account_index::is_email_ambiguous("shared@example.com"));
+
+    std::string path;
+    std::string error_message = "sentinel";
+    ASSERT_TRUE(account_index::find_path_by_email("shared@example.com", &path, &error_message))
+        << error_message;
+}
+
+TEST_F(AccountIndexTest, QuarantineWithdrawsTheRecordsClaimsSoTheSurvivorResolves)
+{
+    // Setting a duplicate record aside IS a repair: the record is out of the running for every key
+    // it claimed, so whoever else claimed them gets them back.
+    account_index::upsert(make_account("first@example.com", "shared", { "Bob" }),
+        "accounts/A-E/first@example.com/account.json");
+    account_index::upsert(make_account("second@example.com", "shared", { "Bob" }),
+        "accounts/P-T/second@example.com/account.json");
+    ASSERT_TRUE(account_index::is_character_ambiguous("Bob"));
+    ASSERT_TRUE(account_index::is_account_name_ambiguous("shared"));
+
+    account_index::quarantine("second@example.com", "accounts/P-T/second@example.com/account.json",
+        "unparseable JSON");
+
+    EXPECT_FALSE(account_index::is_character_ambiguous("Bob"));
+    EXPECT_FALSE(account_index::is_account_name_ambiguous("shared"));
+
+    std::string owner_email;
+    ASSERT_TRUE(account_index::find_owner_email_by_character("Bob", &owner_email, nullptr));
+    EXPECT_EQ(owner_email, "first@example.com");
+
+    std::string path;
+    ASSERT_TRUE(account_index::find_path_by_account_name("shared", &path, nullptr));
+    EXPECT_EQ(path, "accounts/A-E/first@example.com/account.json");
+}
+
+TEST_F(AccountIndexTest, ContestedKeysAreListedForTheWizardCommand)
+{
+    // `account index` prints these. A contested character key silently stops that character's saves
+    // while `account index verify` reports agreement throughout (index and disk agree perfectly
+    // about a real on-disk duplicate), so this listing is the only place the state is visible.
+    account_index::upsert(make_account("first@example.com", "shared", { "Bob" }),
+        "accounts/A-E/first@example.com/account.json");
+    account_index::upsert(make_account("second@example.com", "shared", { "Bob" }),
+        "accounts/P-T/second@example.com/account.json");
+
+    const std::vector<account_index::ContestedKey> contested = account_index::contested_keys();
+    ASSERT_EQ(contested.size(), 2u);
+
+    // Sorted by kind then key: "account name" before "character".
+    EXPECT_EQ(contested[0].kind, "account name");
+    EXPECT_EQ(contested[0].key, "shared");
+    ASSERT_EQ(contested[0].claimants.size(), 2u);
+    EXPECT_EQ(contested[0].claimants[0], "first@example.com");
+    EXPECT_EQ(contested[0].claimants[1], "second@example.com");
+
+    EXPECT_EQ(contested[1].kind, "character");
+    EXPECT_EQ(contested[1].key, "bob");
+    ASSERT_EQ(contested[1].claimants.size(), 2u);
+}
+
+TEST_F(AccountIndexTest, ContestedKeysIsEmptyForAHealthyIndex)
+{
+    account_index::upsert(make_account("player@example.com", "player", { "Frodo", "Sam" }),
+        "accounts/P-T/player@example.com/account.json");
+    account_index::upsert(make_account("player@example.com", "player", { "Frodo" }),
+        "accounts/P-T/player@example.com/account.json");
+
+    EXPECT_TRUE(account_index::contested_keys().empty());
+}
+
+TEST_F(AccountIndexTest, ContestedEmailsAreListedWithTheirRecordPaths)
+{
+    account_index::upsert(make_account("shared@example.com", "aaa", {}),
+        "accounts/P-T/aaa.json", /*legacy_flat_layout=*/true);
+    account_index::upsert(make_account("shared@example.com", "bbb", {}),
+        "accounts/P-T/bbb.json", /*legacy_flat_layout=*/true);
+
+    const std::vector<account_index::ContestedKey> contested = account_index::contested_keys();
+    ASSERT_EQ(contested.size(), 1u);
+    EXPECT_EQ(contested[0].kind, "email");
+    EXPECT_EQ(contested[0].key, "shared@example.com");
+    ASSERT_EQ(contested[0].claimants.size(), 2u);
+    EXPECT_EQ(contested[0].claimants[0], "accounts/P-T/aaa.json");
+    EXPECT_EQ(contested[0].claimants[1], "accounts/P-T/bbb.json");
+}
+
+// --- Name-key erasure is per-record, not a scan -------------------------------------------------
+
+TEST_F(AccountIndexTest, RetiringOneRecordsNameKeyLeavesEveryOtherRecordsNameAlone)
+{
+    // upsert erases the email's old name key by looking it up in the entry, not by walking every
+    // indexed account name. This pins that the narrower erase still retires exactly the right key
+    // and disturbs nothing else, at a size where a wrong key would show.
+    for (int index = 0; index < 50; ++index) {
+        const std::string email = "user" + std::to_string(index) + "@example.com";
+        account_index::upsert(make_account(email, "name" + std::to_string(index), {}),
+            "accounts/U-Z/" + email + "/account.json");
+    }
+
+    account_index::upsert(make_account("user7@example.com", "renamed", {}),
+        "accounts/U-Z/user7@example.com/account.json");
+
+    std::string path;
+    EXPECT_FALSE(account_index::find_path_by_account_name("name7", &path, nullptr))
+        << "the retired name must stop resolving";
+    EXPECT_TRUE(account_index::find_path_by_account_name("renamed", &path, nullptr));
+
+    for (int index = 0; index < 50; ++index) {
+        if (index == 7)
+            continue;
+        EXPECT_TRUE(account_index::find_path_by_account_name("name" + std::to_string(index), &path,
+            nullptr))
+            << "record " << index << " lost its name key";
+    }
+}
+
+TEST_F(AccountIndexTest, ARecordNeverRetiresANameKeyAnotherEmailOwns)
+{
+    // With a contested name the key can belong to somebody else by the time this record is written
+    // again, so the erase confirms ownership before dropping anything.
+    account_index::upsert(make_account("first@example.com", "shared", {}),
+        "accounts/A-E/first@example.com/account.json");
+    account_index::upsert(make_account("second@example.com", "shared", {}),
+        "accounts/P-T/second@example.com/account.json");
+    ASSERT_TRUE(account_index::is_account_name_ambiguous("shared"));
+
+    // first bows out of the dispute, handing "shared" to second...
+    account_index::upsert(make_account("first@example.com", "distinct", {}),
+        "accounts/A-E/first@example.com/account.json");
+    ASSERT_FALSE(account_index::is_account_name_ambiguous("shared"));
+
+    std::string path;
+    ASSERT_TRUE(account_index::find_path_by_account_name("shared", &path, nullptr));
+    EXPECT_EQ(path, "accounts/P-T/second@example.com/account.json");
+
+    // ...and rewriting first again must not take second's key down with it.
+    account_index::upsert(make_account("first@example.com", "distinct", {}),
+        "accounts/A-E/first@example.com/account.json");
+    ASSERT_TRUE(account_index::find_path_by_account_name("shared", &path, nullptr));
+    EXPECT_EQ(path, "accounts/P-T/second@example.com/account.json");
+    EXPECT_TRUE(account_index::find_path_by_account_name("distinct", &path, nullptr));
+}
+
+// --- The candidate filter -----------------------------------------------------------------------
+
+TEST_F(AccountIndexTest, TheRecordEnumeratorSkipsNonRegularJsonEntries)
+{
+    // read_account_file_from_bucket_entry requires S_ISREG. When the enumerator tested only the
+    // ".json" suffix, a dangling symlink or a fifo was visited as a candidate, failed inside that
+    // reader, and got quarantined -- counted against MAX_QUARANTINED_RECORDS_AT_BOOT, six of them
+    // refusing a boot, over filesystem litter that account_storage_contains_unreadable_records does
+    // not consider a record at all.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    ASSERT_EQ(mkdir((root + "/accounts").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((root + "/accounts/A-E").c_str(), 0700), 0);
+
+    std::string error_message;
+    account::AccountData created;
+    ASSERT_TRUE(account::create_account_for_email(root, "real@example.com", "ValidPass1", 1700000000,
+        &created, &error_message))
+        << error_message;
+
+    const std::string dangling_path = root + "/accounts/A-E/dangling.json";
+    const std::string fifo_path = root + "/accounts/A-E/pipe.json";
+    ASSERT_EQ(symlink("no-such-target", dangling_path.c_str()), 0);
+    ASSERT_EQ(mkfifo(fifo_path.c_str(), 0600), 0);
+
+    std::vector<std::string> visited;
+    ASSERT_TRUE(account::for_each_account_record_on_disk(
+        root,
+        [&visited](const account::AccountRecordOnDisk& record) {
+            visited.push_back(record.record_path);
+            // Whatever survives to be visited and fails must carry a reason: an empty one becomes a
+            // log line and a wizard line that trail off into nothing.
+            EXPECT_TRUE(record.parsed || !record.failure_reason.empty())
+                << "empty quarantine reason for " << record.record_path;
+        },
+        &error_message))
+        << error_message;
+
+    ASSERT_EQ(visited.size(), 1u) << "litter must not be visited, or it counts as a bad record";
+    EXPECT_NE(visited[0].find("real@example.com"), std::string::npos);
+
+    // stat() cannot see through either of these, so the directory teardown skips them.
+    unlink(dangling_path.c_str());
+    unlink(fifo_path.c_str());
+}
+
+// --- The owner fast path does not re-read the record ---------------------------------------------
+
+TEST_F(AccountIndexTest, TheOwnerFastPathAnswersWithoutReadingTheRecordFile)
+{
+    // The fast path used to read and JSON-parse the whole account record just to pull account_name
+    // back out of it, on every save of every linked character. Removing the file is what proves the
+    // read is gone rather than merely fast.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+    account_index::set_root_directory(root);
+
+    std::string error_message;
+    account::AccountData created;
+    ASSERT_TRUE(account::create_account_for_email(root, "owner@example.com", "ValidPass1",
+        1700000000, &created, &error_message))
+        << error_message;
+    ASSERT_TRUE(account::add_character_to_account(&created, "Frodo", &error_message)) << error_message;
+    ASSERT_TRUE(account::write_account_file(root, created, &error_message)) << error_message;
+
+    std::string scanned_owner;
+    {
+        ScopedIndexEnabled disabled(false);
+        ASSERT_TRUE(account::find_linked_character_owner_account_uncached(root, "Frodo",
+            &scanned_owner, &error_message))
+            << error_message;
+    }
+    EXPECT_EQ(scanned_owner, created.account_name);
+
+    std::string record_path;
+    ASSERT_TRUE(account_index::find_path_by_email("owner@example.com", &record_path, nullptr));
+    ASSERT_EQ(std::remove(record_path.c_str()), 0);
+
+    std::string indexed_owner;
+    {
+        ScopedIndexEnabled enabled(true);
+        ASSERT_TRUE(account::find_linked_character_owner_account_uncached(root, "Frodo",
+            &indexed_owner, &error_message))
+            << error_message;
+    }
+    EXPECT_EQ(indexed_owner, scanned_owner)
+        << "the fast path must name the same account the scan named";
+
+    // And the scan really cannot answer any more, which is what makes the assertion above mean
+    // something: it did not accidentally fall through to the rollback path.
+    std::string gone_owner;
+    {
+        ScopedIndexEnabled disabled(false);
+        EXPECT_TRUE(account::find_linked_character_owner_account_uncached(root, "Frodo",
+            &gone_owner, &error_message));
+        EXPECT_EQ(gone_owner, "") << "the scan cannot see a record whose file is gone";
+    }
+
+    account_index::set_root_directory(".");
+}
+
 } // namespace

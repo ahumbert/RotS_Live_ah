@@ -946,7 +946,9 @@ bool find_linked_character_owner_account_uncached(const std::string& root_direct
 
         std::string owner_email;
         std::string index_error;
-        if (!account_index::find_owner_email_by_character(character_name, &owner_email, &index_error)) {
+        std::string indexed_owner_account_name;
+        if (!account_index::find_owner_email_by_character(character_name, &owner_email, &index_error,
+                &indexed_owner_account_name)) {
             // The index reports the two outcomes apart by whether it set a message: empty means
             // "no account owns this character" (the scan walks the whole tree, matches nothing and
             // returns true with an empty owner); non-empty means the owning record exists but is
@@ -960,11 +962,21 @@ bool find_linked_character_owner_account_uncached(const std::string& root_direct
             return true;
         }
 
-        AccountData owner_account;
-        if (!read_account_file_by_email(root_directory, owner_email, &owner_account, error_message))
-            return false;
-
-        *owner_account_name = owner_account.account_name;
+        // The index answers with the owner's account name directly. This used to read and JSON-parse
+        // the whole account record just to pull `account_name` back out of it -- on every save of
+        // every linked character, which is the hottest caller this function has -- and the value was
+        // already in hand: deserialize_account_from_json normalizes account_name with the same
+        // normalize_account_name() upsert applied (account_management_storage.cpp:151), so the read
+        // could only ever return the string the index already held.
+        //
+        // The trade being made: that read also proved the record still existed and still parsed, and
+        // dropping it means trusting the index instead. That IS this design's premise -- the index is
+        // authoritative while enabled, maintained at the single write chokepoint, and nothing in the
+        // codebase deletes an account record (character deletion rewrites the record, it does not
+        // remove one; see the no-erase-API note in account_index.h). A record that would not parse is
+        // quarantined at boot and refused above rather than resolved. The disabled path below still
+        // reads, so the rollback behaviour is unchanged.
+        *owner_account_name = indexed_owner_account_name;
         set_error(error_message, "");
         return true;
     }

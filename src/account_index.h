@@ -68,8 +68,14 @@ bool find_path_by_email(const std::string& email, std::string* record_path,
     std::string* error_message);
 bool find_path_by_account_name(const std::string& account_name, std::string* record_path,
     std::string* error_message);
+// `owner_account_name`, when non-null, is filled with the owning record's normalized account name --
+// the same string a read of that record would yield, because deserialize_account_from_json
+// normalizes account_name with the very normalize_account_name() applied at upsert
+// (account_management_storage.cpp:151). It exists so the owner resolver does not have to re-read and
+// re-parse the record file just to name the account it already resolved; see
+// find_linked_character_owner_account_uncached.
 bool find_owner_email_by_character(const std::string& character_name, std::string* owner_email,
-    std::string* error_message);
+    std::string* error_message, std::string* owner_account_name = nullptr);
 
 // Resolves an account name to the email that keys its record. Returns false when the name is
 // unknown or its record is quarantined. Exists because a caller that needs the storage key must not
@@ -83,6 +89,10 @@ bool find_email_by_account_name(const std::string& account_name, std::string* em
 // path find_account_file_path_by_account_name returns when it differs from its target, so the loser
 // would lose its file. The directory scan refused to answer for such a name and so do the two
 // account-name lookups above, with that scan's exact text.
+//
+// Contention is tracked as the SET of claimants, not as a sticky flag, so it lowers again the moment
+// the duplicate is repaired on disk and the repaired record is written: an ambiguity that only a
+// reboot could clear is one that keeps refusing lookups long after the operator fixed the data.
 bool is_account_name_ambiguous(const std::string& account_name);
 
 // True when more than one account record lists this character. The same shape as the account-name
@@ -91,6 +101,11 @@ bool is_account_name_ambiguous(const std::string& account_name);
 // such file, so silently resolving to whichever record was upserted last migrates a player's saves
 // into an account that does not own them. find_owner_email_by_character refuses for such a name with
 // find_character_owner_account's exact text.
+//
+// This is the one that has to lower again: a refusal here makes save_char write NOTHING for that
+// character, silently and to the log only. Unlinking the character from one of the two records and
+// writing that record withdraws its claim, which drops the key back to a single claimant and lets
+// the survivor resolve immediately -- no reboot.
 bool is_character_ambiguous(const std::string& character_name);
 
 // True when more than one account record claims this email with a DIFFERENT account name -- two
@@ -98,7 +113,25 @@ bool is_character_ambiguous(const std::string& character_name);
 // of them cannot coexist. Same-name duplicates across the two layouts are not ambiguous: that is the
 // ordinary flat-plus-directory pair the scan (and upsert's precedence rule) deduplicates.
 // find_path_by_email refuses for such an email with find_account_by_email_internal's exact text.
+//
+// Claimants here are RECORD PATHS carrying the account name each one declares, since the contested
+// thing is the address and the records disputing it are distinguished by where they live. Contested
+// means the claims disagree about the account name -- the scan's own duplicate test -- so an address
+// heals as soon as a rewrite makes the names agree, or when the surviving record is quarantined.
 bool is_email_ambiguous(const std::string& email);
+
+// One contested key, for display. `kind` is "character", "account name" or "email"; `claimants` are
+// the emails disputing it (record paths, for the email kind), sorted. Exists because a contested
+// character key silently stops that character's saves: a state that dangerous has to be visible from
+// in-game, not only inferable from the log.
+struct ContestedKey {
+    std::string kind;
+    std::string key;
+    std::vector<std::string> claimants;
+};
+
+// Every contested key, sorted by kind then key so the wizard listing is stable between calls.
+std::vector<ContestedKey> contested_keys();
 
 bool is_quarantined(const std::string& email);
 
