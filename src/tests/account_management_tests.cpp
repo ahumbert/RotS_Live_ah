@@ -4386,6 +4386,11 @@ TEST(AccountManagement, WriteAccountFileIndexesTheRecord)
     account_index::clear();
 
     TemporaryDirectory temp_directory;
+    // write_account_file only indexes a record written against the index's own root -- the write
+    // side of the same matches_root() guard the resolvers apply. Without declaring the root, the
+    // upsert is (correctly) skipped and the assertions below would be pinning the gap instead of the
+    // behaviour. account_index::clear() puts the root back to "." for whatever runs next.
+    account_index::set_root_directory(temp_directory.path());
     account::AccountData account_data;
     std::string error_message;
     ASSERT_TRUE(account::initialize_new_account("indexed", "indexed@example.com", "Password123", 1000, &account_data, &error_message)) << error_message;
@@ -4403,6 +4408,7 @@ TEST(AccountManagement, WriteAccountFileIndexesNewlyLinkedCharacters)
     account_index::clear();
 
     TemporaryDirectory temp_directory;
+    account_index::set_root_directory(temp_directory.path());
     account::AccountData account_data;
     std::string error_message;
     ASSERT_TRUE(account::initialize_new_account("linker", "linker@example.com", "Password123", 1000, &account_data, &error_message)) << error_message;
@@ -4416,11 +4422,12 @@ TEST(AccountManagement, WriteAccountFileIndexesNewlyLinkedCharacters)
     account_index::clear();
 }
 
-TEST(AccountManagement, AFailedWriteLeavesTheIndexAlone)
+TEST(AccountManagement, AWriteRejectedBeforeAnyFileWorkLeavesTheIndexAlone)
 {
     account_index::clear();
 
     TemporaryDirectory temp_directory;
+    account_index::set_root_directory(temp_directory.path());
     account::AccountData account_data;
     std::string error_message;
     ASSERT_TRUE(account::initialize_new_account("failer", "failer@example.com", "Password123", 1000, &account_data, &error_message)) << error_message;
@@ -4431,6 +4438,37 @@ TEST(AccountManagement, AFailedWriteLeavesTheIndexAlone)
     std::string path;
     EXPECT_FALSE(account_index::find_path_by_email("failer@example.com", &path, nullptr))
         << "a write that never landed must never appear in the index";
+
+    account_index::clear();
+}
+
+TEST(AccountManagement, AWriteThatFailsAfterReachingDiskLeavesTheIndexAlone)
+{
+    // The companion to the test above, and the one that exercises the ordering that matters: this
+    // write creates the account/bucket directories and opens its temp file before failing on the
+    // occupied-target check, so an upsert placed anywhere but after the rename would already have
+    // fired. The early-validation case never reaches file work at all.
+    account_index::clear();
+
+    TemporaryDirectory temp_directory;
+    account_index::set_root_directory(temp_directory.path());
+
+    account::AccountData occupier;
+    std::string error_message;
+    ASSERT_TRUE(account::initialize_new_account("occupier", "shared@example.com", "Password123", 1000, &occupier, &error_message)) << error_message;
+    ASSERT_TRUE(account::write_account_file(temp_directory.path(), occupier, &error_message)) << error_message;
+
+    account::AccountData intruder;
+    ASSERT_TRUE(account::initialize_new_account("intruder", "shared@example.com", "Password123", 1000, &intruder, &error_message)) << error_message;
+    EXPECT_FALSE(account::write_account_file(temp_directory.path(), intruder, &error_message))
+        << "the target path is already held by a different account";
+    EXPECT_EQ(error_message, "Account storage path is already occupied by a different account.");
+
+    std::string path;
+    EXPECT_FALSE(account_index::find_path_by_account_name("intruder", &path, nullptr))
+        << "a write that never landed must never appear in the index";
+    EXPECT_TRUE(account_index::find_path_by_account_name("occupier", &path, nullptr))
+        << "and it must not disturb the record that is really there";
 
     account_index::clear();
 }

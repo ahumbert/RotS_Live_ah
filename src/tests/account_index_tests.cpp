@@ -355,6 +355,11 @@ TEST_F(AccountIndexTest, ResolversAgreeWithTheScanWhenTheIndexIsOn)
     ASSERT_FALSE(root_directory.path().empty());
     const std::string root = root_directory.path();
 
+    // Declared before the writes below: write_account_file only indexes a record written against
+    // the index's own root, so without this the "indexed" observation would run against an empty
+    // index and the comparison would be vacuous in the other direction.
+    account_index::set_root_directory(root);
+
     std::string error_message;
     account::AccountData first_account;
     ASSERT_TRUE(account::create_account_for_email(root, "agree@example.com", "ValidPass1", 1700000000,
@@ -433,9 +438,8 @@ TEST_F(AccountIndexTest, ResolversAgreeWithTheScanWhenTheIndexIsOn)
 
     Observation indexed;
     {
-        // Without this the root guard added for the fast paths would make every call fall through
-        // to the scan and the comparison below would be scan-against-scan, i.e. vacuous.
-        account_index::set_root_directory(root);
+        // The root the index was told about above is what keeps the fast paths from falling through
+        // to the scan here, which would make the comparison below scan-against-scan, i.e. vacuous.
         ScopedIndexEnabled enabled(true);
         indexed = observe();
         account_index::set_root_directory(".");
@@ -751,6 +755,276 @@ TEST_F(AccountIndexTest, RebuildReportStillFlagsAQuarantinedRecordThatVanishedFr
     const std::vector<std::string> disagreements = account_index::rebuild_report(on_disk);
     ASSERT_EQ(disagreements.size(), 1u);
     EXPECT_NE(disagreements[0].find("corrupt@example.com"), std::string::npos);
+}
+
+// --- Character-name ambiguity -------------------------------------------------------------------
+// Two records claiming one character is the silent wrong-account failure, and it lands on the save
+// path: save_char picks the directory it writes a character file into from this answer, and creates
+// one there when the resolved account has none.
+
+TEST_F(AccountIndexTest, ACharacterClaimedByTwoRecordsRefusesWithTheScanText)
+{
+    account_index::upsert(make_account("first@example.com", "first", { "Bob" }),
+        "accounts/A-E/first@example.com/account.json");
+    account_index::upsert(make_account("second@example.com", "second", { "Bob" }),
+        "accounts/P-T/second@example.com/account.json");
+
+    EXPECT_TRUE(account_index::is_character_ambiguous("Bob"));
+
+    std::string owner_email;
+    std::string error_message;
+    EXPECT_FALSE(account_index::find_owner_email_by_character("Bob", &owner_email, &error_message));
+    EXPECT_EQ(error_message, "Multiple account records claim that linked character.")
+        << "must match find_character_owner_account's text verbatim";
+}
+
+TEST_F(AccountIndexTest, AnAmbiguousCharacterProducesTheErrorFormNotTheNotLinkedForm)
+{
+    // The distinction the owner resolver draws: an EMPTY message means "resolved, linked to no
+    // account", which save_char acts on by treating the character as unlinked -- the exact silent
+    // mis-save this refusal exists to prevent. A non-empty message is the error form.
+    account_index::upsert(make_account("first@example.com", "first", { "Bob" }),
+        "accounts/A-E/first@example.com/account.json");
+    account_index::upsert(make_account("second@example.com", "second", { "Bob" }),
+        "accounts/P-T/second@example.com/account.json");
+
+    std::string owner_email;
+    std::string error_message;
+    ASSERT_FALSE(account_index::find_owner_email_by_character("Bob", &owner_email, &error_message));
+    EXPECT_FALSE(error_message.empty())
+        << "an empty message here would make the save path treat the character as unlinked";
+}
+
+TEST_F(AccountIndexTest, AmbiguityIsRecognisedThroughNameNormalization)
+{
+    account_index::upsert(make_account("first@example.com", "first", { "Bob" }),
+        "accounts/A-E/first@example.com/account.json");
+    account_index::upsert(make_account("second@example.com", "second", { "BOB" }),
+        "accounts/P-T/second@example.com/account.json");
+
+    std::string owner_email;
+    EXPECT_FALSE(account_index::find_owner_email_by_character("bOb", &owner_email, nullptr));
+}
+
+TEST_F(AccountIndexTest, RewritingOneRecordNeverMakesItsOwnCharactersAmbiguous)
+{
+    // The false positive that would matter most: every account write re-upserts the whole record,
+    // so if a record's own characters counted as a second claim, one save would break every
+    // subsequent one.
+    account_index::upsert(make_account("only@example.com", "only", { "Bob", "Sam" }),
+        "accounts/K-O/only@example.com/account.json");
+    account_index::upsert(make_account("only@example.com", "only", { "Bob", "Sam" }),
+        "accounts/K-O/only@example.com/account.json");
+    account_index::upsert(make_account("only@example.com", "renamed", { "Bob", "Sam", "Frodo" }),
+        "accounts/K-O/only@example.com/account.json");
+
+    EXPECT_FALSE(account_index::is_character_ambiguous("Bob"));
+
+    std::string owner_email;
+    ASSERT_TRUE(account_index::find_owner_email_by_character("Bob", &owner_email, nullptr));
+    EXPECT_EQ(owner_email, "only@example.com");
+}
+
+TEST_F(AccountIndexTest, AmbiguousCharacterFailsTheSameWayWithTheIndexOnAsWithTheScan)
+{
+    // End to end through the resolver both the save path and the account menu call, against a real
+    // accounts/ tree that really does have two records claiming one character.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    // Declared before the writes: write_account_file only indexes records written against the
+    // index's own root.
+    account_index::set_root_directory(root);
+
+    std::string error_message;
+    account::AccountData first_account;
+    ASSERT_TRUE(account::create_account_for_email(root, "one@example.com", "ValidPass1", 1700000000,
+        &first_account, &error_message))
+        << error_message;
+    ASSERT_TRUE(account::add_character_to_account(&first_account, "Bob", &error_message)) << error_message;
+    ASSERT_TRUE(account::write_account_file(root, first_account, &error_message)) << error_message;
+
+    account::AccountData second_account;
+    ASSERT_TRUE(account::create_account_for_email(root, "two@example.com", "ValidPass1", 1700000000,
+        &second_account, &error_message))
+        << error_message;
+    ASSERT_TRUE(account::add_character_to_account(&second_account, "Bob", &error_message)) << error_message;
+    ASSERT_TRUE(account::write_account_file(root, second_account, &error_message)) << error_message;
+
+    std::string scanned_owner;
+    std::string scanned_error;
+    bool scanned_ok = false;
+    {
+        ScopedIndexEnabled disabled(false);
+        scanned_ok = account::find_linked_character_owner_account_uncached(root, "Bob",
+            &scanned_owner, &scanned_error);
+    }
+
+    std::string indexed_owner;
+    std::string indexed_error;
+    bool indexed_ok = false;
+    {
+        ScopedIndexEnabled enabled(true);
+        indexed_ok = account::find_linked_character_owner_account_uncached(root, "Bob",
+            &indexed_owner, &indexed_error);
+    }
+    account_index::set_root_directory(".");
+
+    EXPECT_FALSE(scanned_ok);
+    EXPECT_EQ(scanned_error, "Multiple account records claim that linked character.");
+    EXPECT_EQ(indexed_ok, scanned_ok);
+    EXPECT_EQ(indexed_error, scanned_error);
+    // The one deliberate difference: on a duplicate the scan leaves its first match sitting in the
+    // out-parameter (account_management.cpp:975-981) while the index path clears it before
+    // answering. Every caller tests the return value first -- save_char's own use is
+    // `find_linked_character_owner_account(...) && !owner_account_name.empty()` (db.cpp:3269) -- so
+    // nothing reads it either way, and empty is the safer of the two.
+    EXPECT_EQ(indexed_owner, "");
+}
+
+// --- Email ambiguity ----------------------------------------------------------------------------
+
+TEST_F(AccountIndexTest, TwoRecordsAtOneAddressUnderDifferentNamesRefuseWithTheScanText)
+{
+    account_index::upsert(make_account("shared@example.com", "aaa", {}),
+        "accounts/P-T/aaa.json", /*legacy_flat_layout=*/true);
+    account_index::upsert(make_account("shared@example.com", "bbb", {}),
+        "accounts/P-T/bbb.json", /*legacy_flat_layout=*/true);
+
+    EXPECT_TRUE(account_index::is_email_ambiguous("shared@example.com"));
+
+    std::string path;
+    std::string error_message;
+    EXPECT_FALSE(account_index::find_path_by_email("SHARED@example.com", &path, &error_message));
+    EXPECT_EQ(error_message, "Multiple account records exist for that email address.")
+        << "must match find_account_by_email_internal's text verbatim";
+}
+
+TEST_F(AccountIndexTest, TheOrdinaryFlatAndDirectoryPairIsNotAmbiguous)
+{
+    // Same account under both layouts is what the scan deduplicates by preferring the directory
+    // record, not a duplicate. Getting this wrong would lock out every account mid-migration.
+    account_index::upsert(make_account("player@example.com", "player", { "Frodo" }),
+        "accounts/P-T/player.json", /*legacy_flat_layout=*/true);
+    account_index::upsert(make_account("player@example.com", "player", { "Frodo" }),
+        "accounts/P-T/player@example.com/account.json", /*legacy_flat_layout=*/false);
+
+    EXPECT_FALSE(account_index::is_email_ambiguous("player@example.com"));
+
+    std::string path;
+    ASSERT_TRUE(account_index::find_path_by_email("player@example.com", &path, nullptr));
+    EXPECT_EQ(path, "accounts/P-T/player@example.com/account.json");
+}
+
+TEST_F(AccountIndexTest, AnAccountNameChangeAtTheSamePathIsNotAmbiguous)
+{
+    // Every rewrite re-upserts, and a rename changes the account name while the path (composed from
+    // the email) stays put. Treating that as a duplicate would lock an account out of its own record
+    // the first time it renamed.
+    account_index::upsert(make_account("player@example.com", "oldname", {}),
+        "accounts/P-T/player@example.com/account.json");
+    account_index::upsert(make_account("player@example.com", "newname", {}),
+        "accounts/P-T/player@example.com/account.json");
+
+    EXPECT_FALSE(account_index::is_email_ambiguous("player@example.com"));
+
+    std::string path;
+    EXPECT_TRUE(account_index::find_path_by_email("player@example.com", &path, nullptr));
+}
+
+TEST_F(AccountIndexTest, AQuarantinedRecordIsNotRewordedAsAnAmbiguousEmail)
+{
+    // A quarantined entry holds no account name to compare against, and its email is reserved on
+    // purpose. "Could not be read" must stay the answer for that address.
+    account_index::quarantine("broken@example.com",
+        "accounts/A-E/broken@example.com/account.json", "unparseable JSON");
+    account_index::upsert(make_account("broken@example.com", "broken", {}),
+        "accounts/A-E/broken.json", /*legacy_flat_layout=*/true);
+
+    EXPECT_FALSE(account_index::is_email_ambiguous("broken@example.com"));
+
+    std::string path;
+    std::string error_message;
+    EXPECT_FALSE(account_index::find_path_by_email("broken@example.com", &path, &error_message));
+    EXPECT_EQ(error_message, "That account record could not be read.");
+}
+
+// --- Quarantine must not take the game down for everyone -----------------------------------------
+
+TEST_F(AccountIndexTest, AQuarantinedRecordDoesNotBlockCreationForEveryOtherAddress)
+{
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    ASSERT_EQ(mkdir((root + "/accounts").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((root + "/accounts/A-E").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((root + "/accounts/A-E/broken@example.com").c_str(), 0700), 0);
+    const std::string broken_path = root + "/accounts/A-E/broken@example.com/account.json";
+    {
+        FILE* broken_file = std::fopen(broken_path.c_str(), "w");
+        ASSERT_NE(broken_file, nullptr);
+        std::fputs("{ this is not valid account json", broken_file);
+        std::fclose(broken_file);
+    }
+
+    // Index off: the pre-branch behaviour, which this change must leave exactly as it was -- one
+    // unreadable record refuses creation for everybody.
+    account::AccountData blocked;
+    std::string error_message;
+    EXPECT_FALSE(account::create_account_for_email(root, "newbie@example.com", "ValidPass1", 1000,
+        &blocked, &error_message));
+    EXPECT_EQ(error_message, "Existing account records could not be read safely.");
+
+    // Index on, with that record quarantined exactly as the boot walker would key it (a directory
+    // record is keyed by its entry name). The game has already decided to run with this record set
+    // aside; it must not keep every other player from creating an account.
+    account_index::set_root_directory(root);
+    account_index::quarantine("broken@example.com", broken_path, "unparseable JSON");
+    account::AccountData created;
+    {
+        ScopedIndexEnabled enabled(true);
+        EXPECT_TRUE(account::create_account_for_email(root, "newbie@example.com", "ValidPass1", 1000,
+            &created, &error_message))
+            << error_message;
+
+        // ...while the quarantined address itself stays reserved.
+        account::AccountData refused;
+        std::string refusal;
+        EXPECT_FALSE(account::create_account_for_email(root, "broken@example.com", "ValidPass1",
+            1000, &refused, &refusal));
+    }
+    account_index::set_root_directory(".");
+}
+
+TEST_F(AccountIndexTest, CreateAccountItselfRefusesAQuarantinedAddress)
+{
+    // create_account is public header API and today has exactly one caller, but the guard belongs
+    // here too: the mismatched-email quarantine shape parses fine, so
+    // account_storage_contains_unreadable_records cannot see it and a direct caller would write a
+    // fresh account straight over a real player's record.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    account_index::set_root_directory(root);
+    account_index::quarantine("occupied@example.com",
+        "accounts/K-O/occupied@example.com/account.json", "mismatched normalized email");
+
+    account::AccountData created;
+    std::string error_message;
+    {
+        ScopedIndexEnabled enabled(true);
+        EXPECT_FALSE(account::create_account(root, "newname", "occupied@example.com", "ValidPass1",
+            1000, &created, &error_message))
+            << "creating here would overwrite a real player's record";
+    }
+    account_index::set_root_directory(".");
+
+    EXPECT_FALSE(error_message.empty());
+    EXPECT_EQ(error_message.find("already exists"), std::string::npos)
+        << "must not disclose that a record exists at this address: " << error_message;
 }
 
 } // namespace
