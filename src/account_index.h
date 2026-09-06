@@ -85,7 +85,30 @@ bool find_email_by_account_name(const std::string& account_name, std::string* em
 // account-name lookups above, with that scan's exact text.
 bool is_account_name_ambiguous(const std::string& account_name);
 
+// True when more than one account record lists this character. The same shape as the account-name
+// case and the more dangerous of the two: save_char (db.cpp) picks the directory it writes a
+// character file into from the owner this resolves to, and CREATES one there when the winner has no
+// such file, so silently resolving to whichever record was upserted last migrates a player's saves
+// into an account that does not own them. find_owner_email_by_character refuses for such a name with
+// find_character_owner_account's exact text.
+bool is_character_ambiguous(const std::string& character_name);
+
+// True when more than one account record claims this email with a DIFFERENT account name -- two
+// legacy flat records, in practice, since a directory record's path is derived from its email so two
+// of them cannot coexist. Same-name duplicates across the two layouts are not ambiguous: that is the
+// ordinary flat-plus-directory pair the scan (and upsert's precedence rule) deduplicates.
+// find_path_by_email refuses for such an email with find_account_by_email_internal's exact text.
+bool is_email_ambiguous(const std::string& email);
+
 bool is_quarantined(const std::string& email);
+
+// Exact-key quarantine lookup: takes the key a record is filed under (account_index_quarantine_key's
+// result) and does NOT normalize it, exactly as quarantine() does not. is_quarantined() above is the
+// email-shaped door onto the same map and normalizes its argument, which silently corrupts the two
+// path-shaped quarantine keys (a case-sensitive filesystem path with an uppercase bucket letter).
+// Callers that already hold a record's index key must use this one.
+bool is_quarantined_record_key(const std::string& record_key);
+
 std::vector<Entry> quarantined_entries();
 std::size_t quarantined_count();
 

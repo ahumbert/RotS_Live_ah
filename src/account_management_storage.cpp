@@ -256,7 +256,15 @@ bool write_account_file(const std::string& root_directory, const AccountData& ac
     // Same chokepoint, same condition: after the rename, only on a fully successful write. The
     // index re-derives every key from the record just written, so link, unlink, rename and an
     // account-name change are all handled without diffing against what was there before.
-    account_index::upsert(normalized_account, final_path);
+    //
+    // Root-guarded, the other half of the resolvers' matches_root() guard: final_path was composed
+    // against THIS caller's root, and the index holds paths for one tree only. Indexing a foreign
+    // root's path would leave lookups against the real (".") tree serving a path into that other
+    // tree. Deliberately NOT gated on is_enabled(): the index is maintained on every write whether
+    // or not the resolvers currently consult it, which is what lets `account index on` arm
+    // immediately instead of having to rebuild (act_wiz.cpp's toggle relies on this).
+    if (account_index::matches_root(root_directory))
+        account_index::upsert(normalized_account, final_path);
 
     set_error(error_message, "");
     return true;

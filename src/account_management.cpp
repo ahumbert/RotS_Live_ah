@@ -1094,6 +1094,22 @@ namespace {
         return false;
     }
 
+    // The index key a bucket entry that FAILED to parse is (or would be) filed under. Expressed
+    // through account_index_quarantine_key rather than restating its rule: for the directory layout
+    // the key is the entry name, for a legacy flat file it is the file's own path -- and an unparsed
+    // record discloses no email, so neither shape needs the record read. `record_path` is composed
+    // exactly as for_each_account_record_on_disk composes it for a flat candidate; the directory
+    // shape never consults it.
+    std::string account_index_key_for_unparsed_bucket_entry(const std::string& bucket_path, const dirent& account_entry)
+    {
+        AccountRecordOnDisk record;
+        record.directory_entry_name = account_entry.d_name;
+        record.record_path = bucket_path + "/" + account_entry.d_name;
+        record.directory_layout = is_directory_bucket_entry(bucket_path, account_entry);
+        record.parsed = false;
+        return account_index_quarantine_key(record);
+    }
+
     bool account_storage_contains_unreadable_records(const std::string& root_directory, std::string* error_message)
     {
         const std::string accounts_directory = root_directory + "/accounts";
@@ -1133,6 +1149,20 @@ namespace {
                 if (!read_account_file_from_bucket_entry(bucket_path, *account_entry, &stored_account, &read_error)) {
                     if (read_error == "Entry is not an account record.")
                         continue;
+
+                    // A record the index already quarantined is a known-bad record the game has
+                    // deliberately chosen to run with: boot logged it, counted it, reserved its
+                    // email against exactly the overwrite this function guards, and refused to
+                    // continue at all past MAX_QUARANTINED_RECORDS_AT_BOOT. Reporting it here as
+                    // well would stop EVERY player from creating an account until an operator
+                    // noticed one bad file -- the whole outcome quarantine exists to avoid. Behaviour
+                    // is unchanged when the index is off or belongs to another tree: it is then not
+                    // an authority on what is known-bad, and this stays the pre-branch scan.
+                    if (account_index::is_enabled() && account_index::matches_root(root_directory)
+                        && account_index::is_quarantined_record_key(
+                            account_index_key_for_unparsed_bucket_entry(bucket_path, *account_entry)))
+                        continue;
+
                     closedir(bucket_dir);
                     closedir(accounts_dir);
                     set_error(error_message, "Existing account records could not be read safely.");

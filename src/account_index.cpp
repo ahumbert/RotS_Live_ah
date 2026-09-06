@@ -29,6 +29,28 @@ namespace {
     // the race would have its file deleted. The directory scan refused to answer at all in this
     // situation, and so does the index -- see find_path_by_account_name.
     std::unordered_set<std::string> g_ambiguous_account_names;
+    // Character keys claimed by more than one account record. Same shape as the account-name set
+    // above and the same reason for existing, except that the consequence is worse: save_char
+    // (db.cpp:3269-3296) chooses the directory it writes a character file into from the owner this
+    // index resolves, and the branch at db.cpp:3286 CREATES that file when the resolved account has
+    // none -- so answering with whichever record was upserted last would migrate a player's saves
+    // into an account that does not own the character, and would flip on every write to either
+    // record. find_character_owner_account refused to answer here, and so does
+    // find_owner_email_by_character.
+    //
+    // Sticky until clear(): once two records claim a character, nothing short of a reboot un-flags
+    // it. That is deliberate and matches g_ambiguous_account_names. Only the boot walk can produce
+    // this state today -- admin_link_character/admin_link_and_migrate_character
+    // (account_management_identity.cpp:983,1019) refuse to link a character another account already
+    // owns -- so a live write cannot raise the flag, and the state it describes is on disk and has
+    // to be repaired there.
+    std::unordered_set<std::string> g_ambiguous_characters;
+    // Emails claimed by more than one record under different account names. Mirrors
+    // find_account_by_email_internal's own duplicate handling (account_management.cpp:1060-1075):
+    // two records at one address are a duplicate only when their account NAMES differ; when they
+    // agree it is the ordinary legacy-flat-plus-directory pair, which that scan deduplicates by
+    // preferring the directory record and upsert's precedence rule resolves the same way.
+    std::unordered_set<std::string> g_ambiguous_emails;
 
     bool g_enabled = false;
     // The root directory every record_path in here was composed against. The resolvers ignore their
@@ -73,11 +95,30 @@ void upsert(const account::AccountData& account, const std::string& record_path,
     if (email.empty())
         return;
 
+    const std::string normalized_account_name = account::normalize_account_name(account.account_name);
+
+    const auto existing = g_entries.find(email);
+    // Two DIFFERENT records at one address, disagreeing about the account name: the case
+    // find_account_by_email_internal refuses to answer for. Tested before the precedence return
+    // below, because the flat-record-ignored case is one of the two ways this arises. Three
+    // conditions, each load-bearing:
+    //   - a differing record_path is what makes this two records rather than one being rewritten.
+    //     A live write cannot fail it: final_path is composed purely from the email, so every
+    //     rewrite (an account rename included) lands on the path already indexed.
+    //   - a differing account name is the scan's own duplicate test; equal names are the ordinary
+    //     flat-plus-directory pair, deduplicated by precedence, not a duplicate.
+    //   - a quarantined incumbent is excluded: it holds no account name to compare and its email is
+    //     deliberately reserved, so "could not be read" must stay the answer for that address
+    //     rather than being reworded into a duplicate report.
+    if (existing != g_entries.end() && !existing->second.quarantined
+        && existing->second.record_path != record_path
+        && existing->second.normalized_account_name != normalized_account_name)
+        g_ambiguous_emails.insert(email);
+
     // Directory-over-flat precedence: a legacy flat record must not displace a directory record (or
     // a quarantined directory record -- quarantine() leaves legacy_flat_layout at its default of
     // false) already indexed under the same email. Without this, whichever one readdir happens to
     // visit last would silently win.
-    const auto existing = g_entries.find(email);
     if (legacy_flat_layout && existing != g_entries.end() && !existing->second.legacy_flat_layout)
         return;
 
@@ -86,7 +127,7 @@ void upsert(const account::AccountData& account, const std::string& record_path,
     Entry entry;
     entry.normalized_email = email;
     entry.record_path = record_path;
-    entry.normalized_account_name = account::normalize_account_name(account.account_name);
+    entry.normalized_account_name = normalized_account_name;
     entry.legacy_flat_layout = legacy_flat_layout;
     g_entries[email] = entry;
 
@@ -108,6 +149,13 @@ void upsert(const account::AccountData& account, const std::string& record_path,
         const std::string character_key = account::normalize_account_name(character_name);
         if (character_key.empty())
             continue;
+        // erase_owned_keys above already dropped every character key this email owned, so a key
+        // still present belongs to a DIFFERENT email: two records claim one character. Record it and
+        // let find_owner_email_by_character refuse, exactly as the scan did -- overwriting instead
+        // would send this character's saves to whichever record was written last.
+        const auto existing_character = g_characters.find(character_key);
+        if (existing_character != g_characters.end() && existing_character->second != email)
+            g_ambiguous_characters.insert(character_key);
         g_characters[character_key] = email;
         owned.push_back(character_key);
     }
@@ -142,7 +190,14 @@ void quarantine(const std::string& normalized_email, const std::string& record_p
 bool find_path_by_email(const std::string& email, std::string* record_path,
     std::string* error_message)
 {
-    const auto entry = g_entries.find(account::normalize_email(email));
+    const std::string normalized_email = account::normalize_email(email);
+    if (g_ambiguous_emails.count(normalized_email) != 0) {
+        // Verbatim find_account_by_email_internal's duplicate text (account_management.cpp:1073).
+        set_error(error_message, "Multiple account records exist for that email address.");
+        return false;
+    }
+
+    const auto entry = g_entries.find(normalized_email);
     if (entry == g_entries.end()) {
         set_error(error_message, "No account exists for that email address.");
         return false;
@@ -176,13 +231,31 @@ bool find_path_by_account_name(const std::string& account_name, std::string* rec
         set_error(error_message, "Failed to open account file for account '" + normalized_account_name + "': " + std::strerror(ENOENT));
         return false;
     }
+    // Note that this inherits find_path_by_email's refusal when the resolved email is claimed by two
+    // records under different names -- with that function's message, not this one's. The name scan
+    // would have answered (it matches on the name, which is unique in that configuration), so this
+    // is a deliberate divergence in the refusing direction: only one of the two records is indexed
+    // under the email, so a path returned here could well be the other record's, and both callers
+    // that matter treat a refusal as "no existing file" (write_account_file then retires nothing,
+    // create_account then proceeds exactly as it does after the scan's own duplicate-email refusal).
     return find_path_by_email(name_entry->second, record_path, error_message);
 }
 
 bool find_owner_email_by_character(const std::string& character_name, std::string* owner_email,
     std::string* error_message)
 {
-    const auto character_entry = g_characters.find(account::normalize_account_name(character_name));
+    const std::string character_key = account::normalize_account_name(character_name);
+    if (g_ambiguous_characters.count(character_key) != 0) {
+        // Verbatim find_character_owner_account's duplicate text (account_management.cpp:979).
+        // Setting a message is what makes this the ERROR form for the caller: the owner resolver
+        // (account_management_identity.cpp:937-949) reads an EMPTY message as "resolved, this
+        // character is linked to no account", which save_char would act on by treating the character
+        // as unlinked -- the exact silent mis-save this refusal exists to prevent.
+        set_error(error_message, "Multiple account records claim that linked character.");
+        return false;
+    }
+
+    const auto character_entry = g_characters.find(character_key);
     if (character_entry == g_characters.end()) {
         set_error(error_message, "");
         return false;
@@ -232,7 +305,12 @@ bool find_email_by_account_name(const std::string& account_name, std::string* em
 
 bool is_quarantined(const std::string& email)
 {
-    const auto entry = g_entries.find(account::normalize_email(email));
+    return is_quarantined_record_key(account::normalize_email(email));
+}
+
+bool is_quarantined_record_key(const std::string& record_key)
+{
+    const auto entry = g_entries.find(record_key);
     return entry != g_entries.end() && entry->second.quarantined;
 }
 
@@ -266,6 +344,16 @@ bool is_account_name_ambiguous(const std::string& account_name)
     return g_ambiguous_account_names.count(account::normalize_account_name(account_name)) != 0;
 }
 
+bool is_character_ambiguous(const std::string& character_name)
+{
+    return g_ambiguous_characters.count(account::normalize_account_name(character_name)) != 0;
+}
+
+bool is_email_ambiguous(const std::string& email)
+{
+    return g_ambiguous_emails.count(account::normalize_email(email)) != 0;
+}
+
 void clear()
 {
     g_entries.clear();
@@ -273,6 +361,8 @@ void clear()
     g_characters.clear();
     g_owned_characters.clear();
     g_ambiguous_account_names.clear();
+    g_ambiguous_characters.clear();
+    g_ambiguous_emails.clear();
     g_root_directory = ".";
 }
 

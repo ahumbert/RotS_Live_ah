@@ -463,6 +463,18 @@ bool create_account(const std::string& root_directory, const std::string& accoun
     if (!is_valid_email(email, error_message))
         return false;
 
+    // The same guard create_account_for_email applies, deliberately duplicated rather than left to
+    // that one caller. This function is public header API, and the quarantine shape it protects
+    // against is one account_storage_contains_unreadable_records below cannot see: a record whose
+    // stored email disagrees with the directory it is filed under parses perfectly, so only the
+    // index knows it is unusable. Without this, a future direct caller would create a fresh account
+    // straight over a real player's record. Reached today only via create_account_for_email, whose
+    // own guard has already refused, so this changes no live behaviour.
+    if (account_index::is_enabled() && account_index::matches_root(root_directory) && account_index::is_quarantined(email)) {
+        set_error(error_message, "That email address cannot be used right now.");
+        return false;
+    }
+
     std::string storage_error;
     if (account_storage_contains_unreadable_records(root_directory, &storage_error)) {
         set_error(error_message, storage_error);

@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "account_cache.h"
 #include "account_index.h"
 #include "account_management.h"
 #include "account_management_storage.h"
@@ -3202,10 +3203,37 @@ ACMD(do_account)
             // is safe at any time only because it is maintained on every write regardless of this
             // flag -- the flag governs whether the resolvers CONSULT it, never whether it is kept
             // current (account_management_storage.cpp's write chokepoint calls account_index::upsert
-            // unconditionally). If that ever stops being true, this toggle would need to rebuild
-            // before it arms.
+            // for every write against the index's own root). If that ever stops being true, this
+            // toggle would need to rebuild before it arms.
             const bool enable = !str_cmp(index_action, "on");
+
+            // Turning the index off does not roll anything back while a quarantined record exists.
+            // The fallback the resolvers drop back to (find_character_owner_account,
+            // account_management.cpp:963-995) returns a hard failure for ANY record it cannot parse,
+            // and save_char (db.cpp:3269,3304) reacts to that by writing NOTHING for every
+            // account-native character -- a log line, no player-visible sign, and total progress
+            // loss until somebody reads the log. That scan's behaviour is the pre-branch behaviour
+            // and stays byte-identical; this is the toggle refusing to walk into it. `on` is always
+            // allowed: the index is the thing that tolerates a quarantined record.
+            if (!enable && account_index::quarantined_count() > 0) {
+                sprintf(buf1, "Refusing: %lu account record(s) are quarantined.\n\r",
+                    static_cast<unsigned long>(account_index::quarantined_count()));
+                send_to_char(buf1, ch);
+                send_to_char("With the index off, the directory scan fails on every one of them and\n\r", ch);
+                send_to_char("NO account-native character can save -- silently, to the log only.\n\r", ch);
+                send_to_char("Move the quarantined record(s) listed above out of accounts/ and reboot\n\r", ch);
+                send_to_char("first; the index can be turned off safely once none remain.\n\r", ch);
+                return;
+            }
+
             account_index::set_enabled(enable);
+            // The cache memoizes both read_account_file and find_linked_character_owner_account
+            // outcomes, negative "not linked" answers included (account_cache.h), and is otherwise
+            // flushed only by a successful account write. Without this flush, every answer the index
+            // produced would survive the flip and keep being served -- and an immortal throws this
+            // switch precisely because they suspect those answers. Both directions: turning it ON
+            // must equally discard the scan's answers.
+            account_cache::invalidate_all();
             sprintf(buf1, "Account index lookups are now %s.\n\r", enable ? "ON" : "OFF");
             send_to_char(buf1, ch);
             sprintf(buf1, "%s turned the account index %s.", GET_NAME(ch), enable ? "on" : "off");
