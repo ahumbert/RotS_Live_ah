@@ -540,10 +540,29 @@ bool is_enabled()
     return g_enabled;
 }
 
+namespace {
+
+    std::string join_claimants(const std::set<std::string>& claimants)
+    {
+        std::string joined;
+        for (const std::string& claimant : claimants) {
+            if (!joined.empty())
+                joined += ", ";
+            joined += claimant;
+        }
+        return joined;
+    }
+
+} // namespace
+
 std::vector<std::string> rebuild_report(const std::vector<Entry>& records_on_disk)
 {
     std::vector<std::string> disagreements;
     std::unordered_set<std::string> seen;
+    // character key -> the emails that claim it ON DISK. std::map/std::set so the lines below come
+    // out in a stable order; an immortal comparing two runs must be able to tell a changed state
+    // from a reshuffled one.
+    std::map<std::string, std::set<std::string>> characters_on_disk;
 
     for (const Entry& record : records_on_disk) {
         seen.insert(record.normalized_email);
@@ -556,7 +575,10 @@ std::vector<std::string> rebuild_report(const std::vector<Entry>& records_on_dis
             // The index correctly has this record marked unreadable, and the record is right here
             // on disk under the same key -- that IS the index agreeing with disk about a file it
             // cannot parse, not drift. `account index` on its own already lists every quarantined
-            // record; verify's job is to find disagreement, and there isn't any here.
+            // record; verify's job is to find disagreement, and there isn't any here. Its character
+            // keys are deliberately absent from the index (quarantine withdraws every claim), so
+            // they are not collected below either -- collecting them would report the one state the
+            // index is deliberately in as drift.
             continue;
         }
         if (indexed->second.record_path != record.record_path) {
@@ -567,7 +589,73 @@ std::vector<std::string> rebuild_report(const std::vector<Entry>& records_on_dis
             disagreements.push_back("account name differs for " + record.normalized_email + ": index has "
                 + indexed->second.normalized_account_name + ", disk has " + record.normalized_account_name);
         }
+
+        for (const std::string& character_name : record.character_keys) {
+            const std::string character_key = account::normalize_account_name(character_name);
+            if (character_key.empty())
+                continue;
+            characters_on_disk[character_key].insert(record.normalized_email);
+        }
     }
+
+    // --- Character keys, the ones that actually drift ---------------------------------------------
+    for (const auto& claim : characters_on_disk) {
+        const std::string& character_key = claim.first;
+        const std::set<std::string>& disk_owners = claim.second;
+
+        const auto contested = g_contested_characters.find(character_key);
+        if (contested != g_contested_characters.end()) {
+            // A character genuinely listed by two records is the index agreeing with disk, not
+            // drift -- as long as both sides name the same claimants. If they do not, the index is
+            // refusing on behalf of a record that no longer disputes the key (or missing one that
+            // does), which is drift of the most dangerous kind: a contested character makes
+            // save_char write NOTHING for that character.
+            if (contested->second != disk_owners) {
+                disagreements.push_back("character '" + character_key + "' contested: index claimants "
+                    + join_claimants(contested->second) + ", disk claimants " + join_claimants(disk_owners));
+            }
+            continue;
+        }
+
+        if (disk_owners.size() > 1) {
+            disagreements.push_back("character '" + character_key + "' is listed on disk by "
+                + join_claimants(disk_owners) + " but the index is not treating it as contested");
+            continue;
+        }
+
+        const std::string& disk_owner = *disk_owners.begin();
+        const auto indexed_owner = g_characters.find(character_key);
+        if (indexed_owner == g_characters.end()) {
+            disagreements.push_back("character '" + character_key + "' missing from index: disk has it on "
+                + disk_owner);
+            continue;
+        }
+        if (indexed_owner->second != disk_owner) {
+            // The staleness that sends a save to the wrong account: save_char picks the directory
+            // it writes into from this key, and CREATES a file there when the resolved account has
+            // none.
+            disagreements.push_back("owner differs for character '" + character_key + "': index has "
+                + indexed_owner->second + ", disk has " + disk_owner);
+        }
+    }
+
+    // The other direction: a character key the index still serves that no record on disk lists any
+    // more -- the shape a stale key takes after the boot auto-deletion sweep. Collected into a set
+    // first because g_characters is unordered and the listing must be stable between calls.
+    std::set<std::string> orphaned_character_lines;
+    for (const auto& indexed_character : g_characters) {
+        if (characters_on_disk.find(indexed_character.first) == characters_on_disk.end()) {
+            orphaned_character_lines.insert("character '" + indexed_character.first + "' in index (owner "
+                + indexed_character.second + ") but no record on disk lists it");
+        }
+    }
+    for (const auto& contested : g_contested_characters) {
+        if (characters_on_disk.find(contested.first) == characters_on_disk.end()) {
+            orphaned_character_lines.insert("character '" + contested.first + "' contested in index (claimants "
+                + join_claimants(contested.second) + ") but no record on disk lists it");
+        }
+    }
+    disagreements.insert(disagreements.end(), orphaned_character_lines.begin(), orphaned_character_lines.end());
 
     for (const auto& indexed : g_entries) {
         if (seen.find(indexed.first) == seen.end())

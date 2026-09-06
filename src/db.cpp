@@ -3279,6 +3279,21 @@ void save_char(struct char_data* ch, int load_room, int notify_char)
     const bool account_native_player_entry = has_suffix((player_table + tmp)->ch_file, ".character.json");
     const bool linked_character = account::find_linked_character_owner_account(".", GET_NAME(ch), &owner_account_name, &account_error) && !owner_account_name.empty();
     if (linked_character) {
+        // An account whose storage key will not resolve makes every account_character_* path
+        // collapse onto accounts/__invalid_account__. Nothing enumerates that directory, so a save
+        // written there is lost the moment the process restarts -- and, worse, the branch below
+        // that repairs a "missing" character file would CREATE it there and then repoint
+        // player_table at it, so the real file goes stale while the log reports success. Refuse
+        // loudly instead: a refused save is one save, a redirected save is every save from here on.
+        const std::string account_directory = account::account_character_directory(".", owner_account_name, GET_NAME(ch));
+        if (account::is_invalid_account_storage_directory(account_directory)) {
+            sprintf(buf, "save_char: REFUSING to save %s: account '%s' has no resolvable storage key, so its character files would land in %s and be lost. NOTHING was saved for this character.",
+                GET_NAME(ch), owner_account_name.c_str(), account_directory.c_str());
+            log(buf);
+            mudlog(buf, BRF, LEVEL_IMMORT, TRUE);
+            return;
+        }
+
         bool wrote_account_character_file = false;
         std::string character_file_error;
         const bool has_account_character_file = account::account_character_file_exists(".", owner_account_name, GET_NAME(ch), &character_file_error);

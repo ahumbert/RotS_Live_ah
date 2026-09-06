@@ -663,6 +663,10 @@ TEST_F(AccountIndexTest, RebuildReportNamesEveryDisagreement)
     real_entry.normalized_email = "real@example.com";
     real_entry.record_path = "accounts/P-T/real@example.com/account.json";
     real_entry.normalized_account_name = "real";
+    // The disk view carries the record's characters now: rebuild_report compares those keys too,
+    // and a record whose characters are omitted really IS drift (the index would be serving a
+    // character key no record on disk lists).
+    real_entry.character_keys = { "Frodo" };
     on_disk.push_back(real_entry);
 
     const std::vector<std::string> disagreements = account_index::rebuild_report(on_disk);
@@ -680,6 +684,7 @@ TEST_F(AccountIndexTest, RebuildReportIsEmptyWhenTheIndexAgrees)
     real_entry.normalized_email = "real@example.com";
     real_entry.record_path = "accounts/P-T/real@example.com/account.json";
     real_entry.normalized_account_name = "real";
+    real_entry.character_keys = { "Frodo" };
     on_disk.push_back(real_entry);
 
     EXPECT_TRUE(account_index::rebuild_report(on_disk).empty());
@@ -1424,6 +1429,465 @@ TEST_F(AccountIndexTest, TheOwnerFastPathAnswersWithoutReadingTheRecordFile)
             &gone_owner, &error_message));
         EXPECT_EQ(gone_owner, "") << "the scan cannot see a record whose file is gone";
     }
+
+    account_index::set_root_directory(".");
+}
+
+// --- Wave 3, item 1: the two walkers must agree about what is even a record ----------------------
+//
+// for_each_account_record_on_disk decides what the index sees;
+// account_storage_contains_unreadable_records decides whether account creation is allowed at all.
+// Every disagreement between them produced the same outcome: a record the guard called unreadable
+// that nothing quarantined, so neither escape hatch fired and EVERY registration on the server was
+// refused, permanently, with nothing logged and `account index verify` reporting agreement.
+//
+// These tests deliberately do NOT assert visit counts alone. Pinning the enumerator's count is what
+// let the last regression through: it never touched the sibling walker named in its own rationale.
+
+// Replays the boot sweep (db.cpp) over a tree: parsed records are indexed, unparsed ones are
+// quarantined under the same key both walkers derive. Without this the tests would be asserting
+// against an index nobody built, which is not the state the server runs in.
+void build_index_like_boot(const std::string& root)
+{
+    account_index::clear();
+    account_index::set_root_directory(root);
+    ASSERT_TRUE(account::for_each_account_record_on_disk(root, [](const account::AccountRecordOnDisk& record) {
+        if (!record.parsed) {
+            account_index::quarantine(account::account_index_quarantine_key(record), record.record_path,
+                record.failure_reason);
+            return;
+        }
+        account_index::upsert(record.account, record.record_path, !record.directory_layout);
+    }));
+}
+
+TEST_F(AccountIndexTest, AnAccountDirectoryWeCannotSearchIsQuarantinedRatherThanVanishing)
+{
+    // The reachable one: chmod 0600 on an account directory (a bad umask on a manual SFTP deploy,
+    // a partial restore) makes stat(<dir>/account.json) fail with EACCES. The enumerator used to
+    // `continue` on that, so the account silently left the index -- its owner told "No account
+    // exists for that email address.", every save of an in-game character refused -- while the
+    // creation guard called the very same entry a record it could not read and refused EVERY
+    // registration on the box. One chmod, no evidence anywhere.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    std::string error_message;
+    account::AccountData victim;
+    ASSERT_TRUE(account::create_account_for_email(root, "victim@example.com", "ValidPass1", 1700000000,
+        &victim, &error_message))
+        << error_message;
+    ASSERT_TRUE(account::admin_link_character(root, victim.account_name, "Frodo", 1700000001, nullptr,
+        &error_message))
+        << error_message;
+    account::AccountData bystander;
+    ASSERT_TRUE(account::create_account_for_email(root, "bystander@example.com", "ValidPass1", 1700000002,
+        &bystander, &error_message))
+        << error_message;
+
+    const std::string victim_directory = root + "/accounts/U-Z/victim@example.com";
+    ASSERT_EQ(chmod(victim_directory.c_str(), 0600), 0);
+
+    struct stat probe { };
+    const bool stat_is_blocked = stat((victim_directory + "/account.json").c_str(), &probe) != 0 && errno == EACCES;
+    if (!stat_is_blocked) {
+        chmod(victim_directory.c_str(), 0700);
+        GTEST_SKIP() << "stat() is not blocked for this user (running as root)";
+    }
+
+    bool visited_the_victim = false;
+    std::string victim_quarantine_key;
+    ASSERT_TRUE(account::for_each_account_record_on_disk(
+        root,
+        [&](const account::AccountRecordOnDisk& record) {
+            if (record.record_path.find("victim@example.com") == std::string::npos)
+                return;
+            visited_the_victim = true;
+            EXPECT_FALSE(record.parsed);
+            EXPECT_FALSE(record.failure_reason.empty())
+                << "a quarantined record with no reason is evidence with the evidence missing";
+            victim_quarantine_key = account::account_index_quarantine_key(record);
+        },
+        &error_message))
+        << error_message;
+
+    // Reverted, the enumerator skips this entry entirely and this is false -- which is exactly the
+    // state in which nothing is quarantined, nothing is logged and verify reports agreement.
+    ASSERT_TRUE(visited_the_victim) << "a record we cannot stat must be VISITED, not skipped";
+    // Keyed by the account DIRECTORY's name, which is the email: that is what reserves the address.
+    EXPECT_EQ(victim_quarantine_key, "victim@example.com");
+
+    build_index_like_boot(root);
+    ScopedIndexEnabled enabled(true);
+
+    EXPECT_TRUE(account_index::is_quarantined("victim@example.com"));
+    EXPECT_EQ(account_index::quarantined_count(), 1u);
+
+    // The consequence that matters, and the one a visit-count assertion cannot see: with the record
+    // quarantined its owner's address stays reserved, so nobody registers over a real player's
+    // record. Reverted, the record is not in the index at all, `is_quarantined` is false, and this
+    // creation SUCCEEDS -- writing a brand new account over the victim's directory.
+    account::AccountData intruder;
+    std::string creation_error;
+    EXPECT_FALSE(account::create_account_for_email(root, "victim@example.com", "ValidPass1", 1700000003,
+        &intruder, &creation_error));
+    EXPECT_EQ(creation_error, "That email address cannot be used right now.");
+
+    // And one bad record does not refuse everybody else.
+    account::AccountData newcomer;
+    EXPECT_TRUE(account::create_account_for_email(root, "newcomer@example.com", "ValidPass1", 1700000004,
+        &newcomer, &creation_error))
+        << creation_error;
+
+    account_index::set_root_directory(".");
+    chmod(victim_directory.c_str(), 0700);
+}
+
+TEST_F(AccountIndexTest, AnAppleDoubleDotfileIsLitterToBothWalkers)
+{
+    // The enumerator has always skipped every dotfile; the guard skipped only "." and "..". A macOS
+    // AppleDouble "._account.json" left by an rsync was therefore litter to one walker and a fatal
+    // unreadable record to the other, so it refused every registration while nothing quarantined it.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    std::string error_message;
+    account::AccountData resident;
+    ASSERT_TRUE(account::create_account_for_email(root, "resident@example.com", "ValidPass1", 1700000000,
+        &resident, &error_message))
+        << error_message;
+
+    const std::string apple_double = root + "/accounts/P-T/._account.json";
+    FILE* litter = std::fopen(apple_double.c_str(), "w");
+    ASSERT_NE(litter, nullptr);
+    std::fputs("\x00\x05\x16\x07 not json at all", litter);
+    std::fclose(litter);
+
+    std::size_t visited = 0;
+    ASSERT_TRUE(account::for_each_account_record_on_disk(
+        root,
+        [&visited](const account::AccountRecordOnDisk&) { ++visited; }, &error_message))
+        << error_message;
+    EXPECT_EQ(visited, 1u) << "a dotfile is litter, so it must not be quarantined either";
+
+    // The half the old test never touched. Index DISABLED on purpose: this is the creation guard's
+    // own walk, the rollback path, and it has to be right on its own. Reverted, this fails with
+    // "Existing account records could not be read safely." -- for every registration, forever.
+    ASSERT_FALSE(account_index::is_enabled());
+    account::AccountData newcomer;
+    std::string creation_error;
+    EXPECT_TRUE(account::create_account_for_email(root, "newcomer@example.com", "ValidPass1", 1700000001,
+        &newcomer, &creation_error))
+        << "an AppleDouble must not refuse account creation: " << creation_error;
+}
+
+TEST_F(AccountIndexTest, AnUnopenableBucketIsVisitedAsOneUnreadableRecord)
+{
+    // opendir(bucket) == nullptr was a silent `continue` in the enumerator and a hard failure in the
+    // guard: every account in that bucket left the index at once, AND every registration on the
+    // server was refused, with nothing to show for either.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    std::string error_message;
+    account::AccountData resident;
+    ASSERT_TRUE(account::create_account_for_email(root, "resident@example.com", "ValidPass1", 1700000000,
+        &resident, &error_message))
+        << error_message;
+
+    const std::string bucket = root + "/accounts/P-T";
+    ASSERT_EQ(chmod(bucket.c_str(), 0000), 0);
+    DIR* probe = opendir(bucket.c_str());
+    if (probe != nullptr) {
+        closedir(probe);
+        chmod(bucket.c_str(), 0700);
+        GTEST_SKIP() << "opendir() is not blocked for this user (running as root)";
+    }
+
+    std::vector<account::AccountRecordOnDisk> visited;
+    ASSERT_TRUE(account::for_each_account_record_on_disk(
+        root,
+        [&visited](const account::AccountRecordOnDisk& record) { visited.push_back(record); },
+        &error_message))
+        << error_message;
+
+    // Reverted, visited is empty: the bucket and everything in it disappears without a trace.
+    ASSERT_EQ(visited.size(), 1u);
+    EXPECT_FALSE(visited[0].parsed);
+    EXPECT_EQ(visited[0].record_path, bucket);
+    EXPECT_NE(visited[0].failure_reason.find("Failed to open account bucket directory"), std::string::npos);
+    // Path-shaped key, the same one the guard's escape hatch derives for a bucket.
+    EXPECT_EQ(account::account_index_quarantine_key(visited[0]), bucket);
+
+    build_index_like_boot(root);
+    EXPECT_EQ(account_index::quarantined_count(), 1u);
+    EXPECT_TRUE(account_index::is_quarantined_record_key(bucket));
+
+    account_index::set_root_directory(".");
+    chmod(bucket.c_str(), 0700);
+}
+
+TEST_F(AccountIndexTest, AFlatCandidateWeCannotStatIsVisitedRatherThanSkipped)
+{
+    // The flat branch's own errno axis. The previous wave fixed ENOENT (a dangling symlink is
+    // litter); ELOOP, EIO and ENAMETOOLONG still fell through the same `continue`. A symlink loop
+    // is the reproducible one.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    std::string error_message;
+    account::AccountData resident;
+    ASSERT_TRUE(account::create_account_for_email(root, "resident@example.com", "ValidPass1", 1700000000,
+        &resident, &error_message))
+        << error_message;
+
+    const std::string loop_a = root + "/accounts/P-T/loop.json";
+    const std::string loop_b = root + "/accounts/P-T/loop-partner.json";
+    ASSERT_EQ(symlink("loop-partner.json", loop_a.c_str()), 0);
+    ASSERT_EQ(symlink("loop.json", loop_b.c_str()), 0);
+
+    struct stat probe { };
+    ASSERT_NE(stat(loop_a.c_str(), &probe), 0);
+    ASSERT_EQ(errno, ELOOP);
+
+    std::vector<std::string> unreadable;
+    ASSERT_TRUE(account::for_each_account_record_on_disk(
+        root,
+        [&unreadable](const account::AccountRecordOnDisk& record) {
+            if (!record.parsed)
+                unreadable.push_back(record.record_path);
+        },
+        &error_message))
+        << error_message;
+
+    // Reverted, both loop entries are skipped and this is empty -- while the guard, which stats
+    // them through the shared reader, calls each one a record it cannot read.
+    EXPECT_EQ(unreadable.size(), 2u);
+
+    // And with the index off (the rollback path) the guard must still refuse over them, because an
+    // entry we cannot stat is a record we cannot read, not litter.
+    ASSERT_FALSE(account_index::is_enabled());
+    account::AccountData newcomer;
+    std::string creation_error;
+    EXPECT_FALSE(account::create_account_for_email(root, "newcomer@example.com", "ValidPass1",
+        1700000001, &newcomer, &creation_error));
+    EXPECT_EQ(creation_error, "Existing account records could not be read safely.");
+
+    unlink(loop_a.c_str());
+    unlink(loop_b.c_str());
+}
+
+// --- Wave 3, item 3: verify has to look at the keys that actually drift --------------------------
+
+TEST_F(AccountIndexTest, VerifyReportsACharacterKeyTheIndexStillServesThatDiskDropped)
+{
+    // The blind spot. rebuild_report compared only email -> (record path, account name), which are
+    // the keys that barely move, and never the character keys -- which are exactly what the boot
+    // auto-deletion sweep mutates and exactly the keys whose staleness sends a save into the wrong
+    // account. Reverted, this returns nothing at all and `account index verify` prints
+    // "Index agrees with disk."
+    account_index::upsert(make_account("owner@example.com", "owner", { "Frodo", "Sam" }),
+        "accounts/K-O/owner@example.com/account.json");
+
+    account_index::Entry on_disk_entry;
+    on_disk_entry.normalized_email = "owner@example.com";
+    on_disk_entry.record_path = "accounts/K-O/owner@example.com/account.json";
+    on_disk_entry.normalized_account_name = "owner";
+    on_disk_entry.character_keys = { "Frodo" };
+
+    const std::vector<std::string> disagreements = account_index::rebuild_report({ on_disk_entry });
+    ASSERT_EQ(disagreements.size(), 1u) << (disagreements.empty() ? "" : disagreements[0]);
+    EXPECT_NE(disagreements[0].find("sam"), std::string::npos);
+    EXPECT_NE(disagreements[0].find("no record on disk lists it"), std::string::npos);
+}
+
+TEST_F(AccountIndexTest, VerifyReportsACharacterTheIndexPointsAtTheWrongAccount)
+{
+    // The dangerous direction: save_char picks the directory it writes into from this key and
+    // CREATES a file there when the resolved account has none, so a stale owner migrates a player's
+    // saves into an account that does not own them.
+    account_index::upsert(make_account("first@example.com", "first", { "Frodo" }),
+        "accounts/A-E/first@example.com/account.json");
+    account_index::upsert(make_account("second@example.com", "second", {}),
+        "accounts/P-T/second@example.com/account.json");
+
+    account_index::Entry first;
+    first.normalized_email = "first@example.com";
+    first.record_path = "accounts/A-E/first@example.com/account.json";
+    first.normalized_account_name = "first";
+    account_index::Entry second;
+    second.normalized_email = "second@example.com";
+    second.record_path = "accounts/P-T/second@example.com/account.json";
+    second.normalized_account_name = "second";
+    second.character_keys = { "Frodo" };
+
+    const std::vector<std::string> disagreements = account_index::rebuild_report({ first, second });
+    ASSERT_EQ(disagreements.size(), 1u) << (disagreements.empty() ? "" : disagreements[0]);
+    EXPECT_NE(disagreements[0].find("owner differs for character 'frodo'"), std::string::npos);
+    EXPECT_NE(disagreements[0].find("index has first@example.com"), std::string::npos);
+    EXPECT_NE(disagreements[0].find("disk has second@example.com"), std::string::npos);
+}
+
+TEST_F(AccountIndexTest, VerifyReportsACharacterMissingFromTheIndexEntirely)
+{
+    account_index::upsert(make_account("owner@example.com", "owner", {}),
+        "accounts/K-O/owner@example.com/account.json");
+
+    account_index::Entry on_disk_entry;
+    on_disk_entry.normalized_email = "owner@example.com";
+    on_disk_entry.record_path = "accounts/K-O/owner@example.com/account.json";
+    on_disk_entry.normalized_account_name = "owner";
+    on_disk_entry.character_keys = { "Frodo" };
+
+    const std::vector<std::string> disagreements = account_index::rebuild_report({ on_disk_entry });
+    ASSERT_EQ(disagreements.size(), 1u) << (disagreements.empty() ? "" : disagreements[0]);
+    EXPECT_NE(disagreements[0].find("character 'frodo' missing from index"), std::string::npos);
+}
+
+TEST_F(AccountIndexTest, VerifyTreatsAGenuinelyContestedCharacterAsAgreementNotDrift)
+{
+    // Two records really do list this character on disk, and the index really is refusing to
+    // resolve it. That is the index agreeing with disk, and `account index` lists contested keys on
+    // its own. Reporting it as drift would bury the real drift under noise on exactly the tree an
+    // operator is trying to repair.
+    account_index::upsert(make_account("first@example.com", "first", { "Frodo" }),
+        "accounts/A-E/first@example.com/account.json");
+    account_index::upsert(make_account("second@example.com", "second", { "Frodo" }),
+        "accounts/P-T/second@example.com/account.json");
+    ASSERT_TRUE(account_index::is_character_ambiguous("Frodo"));
+
+    account_index::Entry first;
+    first.normalized_email = "first@example.com";
+    first.record_path = "accounts/A-E/first@example.com/account.json";
+    first.normalized_account_name = "first";
+    first.character_keys = { "Frodo" };
+    account_index::Entry second;
+    second.normalized_email = "second@example.com";
+    second.record_path = "accounts/P-T/second@example.com/account.json";
+    second.normalized_account_name = "second";
+    second.character_keys = { "Frodo" };
+
+    EXPECT_TRUE(account_index::rebuild_report({ first, second }).empty());
+
+    // But a contest the disk no longer supports IS drift: the index is refusing every save for this
+    // character on behalf of a record that has withdrawn its claim.
+    second.character_keys.clear();
+    const std::vector<std::string> disagreements = account_index::rebuild_report({ first, second });
+    ASSERT_EQ(disagreements.size(), 1u) << (disagreements.empty() ? "" : disagreements[0]);
+    EXPECT_NE(disagreements[0].find("character 'frodo' contested"), std::string::npos);
+}
+
+TEST_F(AccountIndexTest, VerifyStaysSilentWhenTheCharacterKeysAgree)
+{
+    // The false-positive guard: without it the new comparison would report drift on every healthy
+    // tree, and an operator would learn to ignore the command.
+    account_index::upsert(make_account("owner@example.com", "owner", { "Frodo", "Samwise" }),
+        "accounts/K-O/owner@example.com/account.json");
+    account_index::quarantine("broken@example.com", "accounts/A-E/broken@example.com/account.json",
+        "unparseable JSON");
+
+    account_index::Entry healthy;
+    healthy.normalized_email = "owner@example.com";
+    healthy.record_path = "accounts/K-O/owner@example.com/account.json";
+    healthy.normalized_account_name = "owner";
+    // Deliberately in a different order and a different case: these are keys, normalized on both
+    // sides, not a copy of the record.
+    healthy.character_keys = { "SAMWISE", "frodo" };
+    account_index::Entry quarantined;
+    quarantined.normalized_email = "broken@example.com";
+    quarantined.record_path = "accounts/A-E/broken@example.com/account.json";
+
+    EXPECT_TRUE(account_index::rebuild_report({ healthy, quarantined }).empty());
+}
+
+// --- Wave 3, item 5: creation must stop walking the whole tree ------------------------------------
+
+TEST_F(AccountIndexTest, CreationDoesNotWalkTheAccountTreeWhenTheIndexIsAuthoritative)
+{
+    // account_storage_contains_unreadable_records opened and JSON-parsed EVERY record on disk on
+    // every registration attempt, from an unauthenticated path, on the single-threaded pulse loop --
+    // O(N) per attempt, N^2 across N creations. The index made find_account_by_email_internal fast
+    // and left this walk in place, so the quadratic the project was justified by was never removed.
+    //
+    // Proved by planting a record the walk would refuse over and the index has never heard of: if
+    // the walk still runs, creation fails. Timing would not prove anything; this does.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    std::string error_message;
+    account::AccountData resident;
+    ASSERT_TRUE(account::create_account_for_email(root, "resident@example.com", "ValidPass1", 1700000000,
+        &resident, &error_message))
+        << error_message;
+
+    build_index_like_boot(root);
+    ASSERT_EQ(account_index::quarantined_count(), 0u);
+
+    // Planted AFTER the index was built, so the index does not know about it and the escape hatch
+    // cannot be what saves this.
+    const std::string poisoned = root + "/accounts/P-T/poisoned.json";
+    FILE* file = std::fopen(poisoned.c_str(), "w");
+    ASSERT_NE(file, nullptr);
+    std::fputs("this is not JSON", file);
+    std::fclose(file);
+
+    {
+        ScopedIndexEnabled enabled(true);
+        account::AccountData created;
+        std::string creation_error;
+        EXPECT_TRUE(account::create_account_for_email(root, "fast@example.com", "ValidPass1",
+            1700000001, &created, &creation_error))
+            << "the scan still ran: " << creation_error;
+    }
+
+    // The rollback path must keep the full scan, unchanged: with the index off the same tree still
+    // refuses. This is what makes the assertion above mean "the walk did not happen" rather than
+    // "the walk stopped noticing".
+    ASSERT_FALSE(account_index::is_enabled());
+    account::AccountData rolled_back;
+    std::string rollback_error;
+    EXPECT_FALSE(account::create_account_for_email(root, "slow@example.com", "ValidPass1", 1700000002,
+        &rolled_back, &rollback_error));
+    EXPECT_EQ(rollback_error, "Existing account records could not be read safely.");
+
+    account_index::set_root_directory(".");
+}
+
+TEST_F(AccountIndexTest, CreationStillRefusesAnAddressWhoseRecordBootCouldNotRead)
+{
+    // The protection the walk was written for, kept without the walk: a quarantined record's
+    // address stays reserved. This is what makes skipping the scan safe rather than merely faster,
+    // so it is asserted here next to the skip rather than left to a distant test.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    std::string error_message;
+    account::AccountData victim;
+    ASSERT_TRUE(account::create_account_for_email(root, "victim@example.com", "ValidPass1", 1700000000,
+        &victim, &error_message))
+        << error_message;
+
+    const std::string record_path = root + "/accounts/U-Z/victim@example.com/account.json";
+    FILE* file = std::fopen(record_path.c_str(), "w");
+    ASSERT_NE(file, nullptr);
+    std::fputs("{ truncated", file);
+    std::fclose(file);
+
+    build_index_like_boot(root);
+    ScopedIndexEnabled enabled(true);
+    ASSERT_EQ(account_index::quarantined_count(), 1u);
+
+    account::AccountData intruder;
+    std::string creation_error;
+    EXPECT_FALSE(account::create_account_for_email(root, "victim@example.com", "ValidPass1", 1700000001,
+        &intruder, &creation_error));
+    EXPECT_EQ(creation_error, "That email address cannot be used right now.");
 
     account_index::set_root_directory(".");
 }

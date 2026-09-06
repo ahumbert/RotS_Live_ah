@@ -35,8 +35,27 @@ namespace {
     {
         const std::string account_storage_key = normalize_email(account.normalized_email);
         if (account_storage_key.empty())
-            return root_directory + "/accounts/__invalid_account__";
+            return root_directory + "/accounts/" + std::string(kInvalidAccountDirectoryName);
         return account_directory_path_from_email(root_directory, account_storage_key);
+    }
+
+    // Every write that composes a destination from an account's storage key funnels through this
+    // before it creates a directory or a file. Returning TRUE means "refuse, error_message is set".
+    //
+    // Writing into the invalid-account sentinel is worse than writing nothing: the file lands
+    // somewhere nothing enumerates, the caller is told it succeeded, the real file goes stale, and
+    // the next boot does not see either. Refusing costs a save; writing there costs every save from
+    // that point on, silently. This is the same trade the adjacent "refusing legacy fallback for
+    // account-native character" branch in save_char (db.cpp) already accepts.
+    bool refuse_invalid_account_storage_directory(const std::string& account_directory,
+        const std::string& account_name, std::string* error_message)
+    {
+        if (!is_invalid_account_storage_directory(account_directory))
+            return false;
+
+        set_error(error_message,
+            "Account '" + normalize_account_name(account_name) + "' has no resolvable storage key; refusing to write into '" + account_directory + "'.");
+        return true;
     }
 
     std::string resolved_character_path(const AccountData& account, const std::string& root_directory, const std::string& character_name)
@@ -193,6 +212,8 @@ namespace {
         const std::string account_root = root_directory + "/accounts";
         const std::string bucket_directory = account_root + "/" + account_bucket_for_name(account_storage_key);
         const std::string account_directory = account_character_directory(root_directory, snapshot_data.account_name, snapshot_data.character_name);
+        if (refuse_invalid_account_storage_directory(account_directory, snapshot_data.account_name, error_message))
+            return false;
         const std::string final_path = account_character_snapshot_path(root_directory, snapshot_data.account_name, snapshot_data.character_name);
         const std::string temp_path = final_path + ".tmp";
 
@@ -292,6 +313,8 @@ namespace {
         }
 
         const std::string account_directory = account_character_directory(root_directory, account_name, character_name);
+        if (refuse_invalid_account_storage_directory(account_directory, account_name, error_message))
+            return false;
         if (!create_directory_if_missing(root_directory + "/accounts", error_message))
             return false;
         if (!create_directory_if_missing(root_directory + "/accounts/" + account_bucket_for_name(resolve_account_storage_key(root_directory, account_name)), error_message))
@@ -410,6 +433,12 @@ namespace {
             return false;
 
         const std::string account_directory = account_character_directory(root_directory, account_name, character_name);
+        if (refuse_invalid_account_storage_directory(account_directory, account_name, error_message))
+            return false;
+        // The record-in-hand twin resolves independently (the record's own email rather than the
+        // name -> email lookup), so it has to be tested too -- the write below uses that one.
+        if (refuse_invalid_account_storage_directory(account_record_directory(root_directory, account), account_name, error_message))
+            return false;
         if (!create_directory_if_missing(root_directory + "/accounts", error_message))
             return false;
         if (!create_directory_if_missing(root_directory + "/accounts/" + account_bucket_for_name(resolve_account_storage_key(root_directory, account_name)), error_message))

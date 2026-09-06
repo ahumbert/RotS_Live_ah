@@ -4472,3 +4472,167 @@ TEST(AccountManagement, AWriteThatFailsAfterReachingDiskLeavesTheIndexAlone)
 
     account_index::clear();
 }
+
+// --- Wave 3, item 2: a save must never land in the invalid-account sentinel ----------------------
+//
+// account_character_directory() (and account_record_directory(), its record-in-hand twin) fall back
+// to accounts/__invalid_account__ when an account's storage key will not resolve. Nothing
+// enumerates that directory: the index never sees it, the boot walk never sees it, and the next
+// cleanup sweeps it away. A character file written there is silently lost -- the log reports
+// success, the real file goes stale, and save_char repoints player_table at the doomed path so
+// every later save follows it.
+
+// Breaks the account's storage key on disk without touching anything else: the record still parses
+// and is still found by name, but it discloses no email, so every account_character_* path for it
+// collapses onto the sentinel. This is the reachable shape (a legacy record with no usable address);
+// write_account_file will not produce it, which is why it is written by hand here.
+std::string blank_out_stored_email(const std::string& account_path)
+{
+    std::string account_json = read_file_contents(account_path);
+    const std::string original = "\"normalized_email\": \"player@example.com\"";
+    EXPECT_NE(account_json.find(original), std::string::npos);
+    account_json.replace(account_json.find(original), original.size(), "\"normalized_email\": \"\"");
+    write_text_file(account_path, account_json);
+    return account_json;
+}
+
+TEST(AccountManagement, RefusesToWriteACharacterFileIntoTheInvalidAccountSentinel)
+{
+    TemporaryDirectory temp_directory;
+    const std::string root = temp_directory.path();
+    std::string error_message;
+
+    ASSERT_TRUE(account::create_account(root, "alpha-admin", "player@example.com", "ValidPass1", 1700007776, nullptr, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_link_character(root, "alpha-admin", "aragorn", 1700007777, nullptr, &error_message)) << error_message;
+    blank_out_stored_email(root + "/accounts/P-T/player@example.com/account.json");
+
+    const std::string sentinel = root + "/accounts/__invalid_account__";
+    ASSERT_TRUE(account::is_invalid_account_storage_directory(
+        account::account_character_directory(root, "alpha-admin", "aragorn")))
+        << "the fixture is meant to make this account's storage key unresolvable";
+
+    char_file_u stored_character = make_stored_character("aragorn");
+    EXPECT_FALSE(account::write_account_character_file(root, "alpha-admin", stored_character, &error_message))
+        << "writing nothing is better than writing somewhere that will be swept away";
+    EXPECT_NE(error_message.find("no resolvable storage key"), std::string::npos) << error_message;
+
+    // The assertion that would still have passed under the bug if this only checked the return
+    // value: the file must not be on disk at all. Reverted, write_account_character_file returns
+    // true and this directory holds aragorn.character.json.
+    struct stat sentinel_info { };
+    EXPECT_NE(stat(sentinel.c_str(), &sentinel_info), 0)
+        << "the invalid-account sentinel directory must never be created";
+}
+
+TEST(AccountManagement, RefusesToWriteObjectAndExploitFilesIntoTheInvalidAccountSentinel)
+{
+    // The other write paths that compose a destination from the same unresolvable key. Checked
+    // because "check whether the sentinel can be reached from any other write path" is the half of
+    // this fix that a single-site patch would have missed.
+    TemporaryDirectory temp_directory;
+    const std::string root = temp_directory.path();
+    std::string error_message;
+
+    ASSERT_TRUE(account::create_account(root, "alpha-admin", "player@example.com", "ValidPass1", 1700007776, nullptr, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_link_character(root, "alpha-admin", "aragorn", 1700007777, nullptr, &error_message)) << error_message;
+    blank_out_stored_email(root + "/accounts/P-T/player@example.com/account.json");
+
+    EXPECT_FALSE(account::write_default_account_object_file(root, "alpha-admin", "aragorn", &error_message));
+    EXPECT_NE(error_message.find("no resolvable storage key"), std::string::npos) << error_message;
+
+    error_message.clear();
+    EXPECT_FALSE(account::write_default_account_exploit_file(root, "alpha-admin", "aragorn", &error_message));
+    EXPECT_NE(error_message.find("no resolvable storage key"), std::string::npos) << error_message;
+
+    struct stat sentinel_info { };
+    EXPECT_NE(stat((root + "/accounts/__invalid_account__").c_str(), &sentinel_info), 0);
+}
+
+TEST(AccountManagement, IdentifiesTheInvalidAccountSentinelWhereverItAppears)
+{
+    EXPECT_TRUE(account::is_invalid_account_storage_directory("./accounts/__invalid_account__"));
+    EXPECT_TRUE(account::is_invalid_account_storage_directory("/srv/rots/lib/accounts/__invalid_account__"));
+    EXPECT_TRUE(account::is_invalid_account_storage_directory("__invalid_account__"));
+    // Not the sentinel: a real account directory, and a name that merely contains the sentinel.
+    EXPECT_FALSE(account::is_invalid_account_storage_directory("./accounts/P-T/player@example.com"));
+    EXPECT_FALSE(account::is_invalid_account_storage_directory("./accounts/__invalid_account__x"));
+}
+
+// --- Wave 3, item 4: a refused write must not leak a descriptor or a temp file -------------------
+
+// Counts this process's open descriptors. write_account_file runs on every successful login
+// (clear_account_login_failures), so a per-call leak walks a process that runs for weeks towards
+// EMFILE -- at which point the server can neither accept connections nor write player files.
+std::size_t count_open_descriptors()
+{
+    DIR* descriptors = opendir("/proc/self/fd");
+    EXPECT_NE(descriptors, nullptr) << "Expected /proc/self/fd for the descriptor-leak check.";
+    if (descriptors == nullptr)
+        return 0;
+
+    std::size_t open_count = 0;
+    while (dirent* entry = readdir(descriptors)) {
+        if (std::strcmp(entry->d_name, ".") == 0 || std::strcmp(entry->d_name, "..") == 0)
+            continue;
+        ++open_count;
+    }
+    closedir(descriptors);
+    return open_count;
+}
+
+TEST(AccountManagement, ARefusedAccountWriteLeaksNoDescriptorAndLeavesNoTempFile)
+{
+    TemporaryDirectory temp_directory;
+    const std::string root = temp_directory.path();
+    std::string error_message;
+
+    account::AccountData account_data;
+    ASSERT_TRUE(account::create_account(root, "alpha-admin", "player@example.com", "ValidPass1", 1700007776, &account_data, &error_message)) << error_message;
+
+    // The record at the destination path no longer parses, which is the "Existing account file
+    // could not be read safely." refusal -- one of the two early returns that used to happen after
+    // the temp file was already open.
+    const std::string final_path = root + "/accounts/P-T/player@example.com/account.json";
+    write_text_file(final_path, "{ this is not an account record");
+
+    ASSERT_FALSE(account::write_account_file(root, account_data, &error_message));
+    EXPECT_EQ(error_message, "Existing account file could not be read safely.");
+
+    // Reverted, this file is sitting there after every refusal.
+    struct stat temp_info { };
+    EXPECT_NE(stat((final_path + ".tmp").c_str(), &temp_info), 0)
+        << "a refused write must not leave a temporary file behind";
+
+    // And the descriptor itself. One refusal is invisible; the login path repeats it.
+    const std::size_t before = count_open_descriptors();
+    for (int attempt = 0; attempt < 40; ++attempt)
+        EXPECT_FALSE(account::write_account_file(root, account_data, nullptr));
+    EXPECT_EQ(count_open_descriptors(), before)
+        << "write_account_file leaked a descriptor per refused write";
+}
+
+TEST(AccountManagement, ARefusedWriteOverAnotherAccountsPathLeaksNoDescriptorEither)
+{
+    // The second early return: the destination parses fine but belongs to a different account.
+    TemporaryDirectory temp_directory;
+    const std::string root = temp_directory.path();
+    std::string error_message;
+
+    account::AccountData occupant;
+    ASSERT_TRUE(account::create_account(root, "occupant", "player@example.com", "ValidPass1", 1700007776, &occupant, &error_message)) << error_message;
+
+    account::AccountData intruder = occupant;
+    intruder.account_name = "intruder";
+
+    const std::string final_path = root + "/accounts/P-T/player@example.com/account.json";
+    ASSERT_FALSE(account::write_account_file(root, intruder, &error_message));
+    EXPECT_EQ(error_message, "Account storage path is already occupied by a different account.");
+
+    struct stat temp_info { };
+    EXPECT_NE(stat((final_path + ".tmp").c_str(), &temp_info), 0);
+
+    const std::size_t before = count_open_descriptors();
+    for (int attempt = 0; attempt < 40; ++attempt)
+        EXPECT_FALSE(account::write_account_file(root, intruder, nullptr));
+    EXPECT_EQ(count_open_descriptors(), before);
+}

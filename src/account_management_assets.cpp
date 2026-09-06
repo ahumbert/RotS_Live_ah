@@ -15,6 +15,11 @@ bool write_account_character_file(const std::string& root_directory, const std::
     // account_record_directory (account_management_internal.cpp).
     const std::string account_storage_key = normalize_email(account.normalized_email);
     const std::string account_directory = account_record_directory(root_directory, account);
+    // The save that must never be silently lost. Everything under the invalid-account sentinel is
+    // invisible to the index and to the boot walk, so writing a character file there means the
+    // player's progress goes to a path nothing will ever read back.
+    if (refuse_invalid_account_storage_directory(account_directory, account_name, error_message))
+        return false;
     if (!create_directory_if_missing(root_directory + "/accounts", error_message))
         return false;
     if (!create_directory_if_missing(root_directory + "/accounts/" + account_bucket_for_name(account_storage_key), error_message))
