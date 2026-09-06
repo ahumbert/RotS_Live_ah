@@ -12,6 +12,26 @@ feature.
 
 ---
 
+## Most of this is now scripted
+
+Two server+client smoke scripts cover the client-observable items, run against a booted server:
+
+```
+python3 testing/smoke_account_index.py [port]              # sections 2, 3, 4, 5 (except the drill)
+python3 testing/smoke_account_index_quarantine.py [port] [quarantined-email]
+```
+
+Both were run green against the merged tree (`53b9cee`) on 2026-09-06 in a throwaway worktree:
+18/18 and 7/7. They live in `testing/`, which is local-only and not tracked, so they are on this
+machine but not in the repo.
+
+The scripts are a floor, not a substitute — they prove the paths still work, not that the game feels
+right. Section 1 (boot) and the quarantine drill's corrupt/reboot/restore steps stay manual, because
+they need a server restart against a doctored account tree; the second script asserts the state
+*after* you have done that.
+
+---
+
 ## Before you start
 
 - **Quit every character all the way out of the game between selection tests.** A character left
