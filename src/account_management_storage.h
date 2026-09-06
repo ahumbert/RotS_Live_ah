@@ -8,6 +8,24 @@
 
 namespace account {
 
+// The leaf directory name account_character_directory() (and account_record_directory(), its
+// record-in-hand twin) falls back to when an account's storage key cannot be resolved.
+//
+// It is NOT a real account directory. for_each_account_record_on_disk only visits
+// accounts/<bucket>/<entry>, and "__invalid_account__" is not a bucket that holds account records,
+// so everything written under it is invisible to the game: the index never sees it, `account index
+// verify` never mentions it, and the next operator cleanup sweeps it away as litter. A character
+// save written there is silently lost -- the log reports success, the real file goes stale, and
+// player_table is repointed at a path that will not survive the next reboot.
+//
+// So the sentinel is a "could not resolve" signal, never a destination. Every write path tests for
+// it with is_invalid_account_storage_directory() below and refuses.
+constexpr const char* kInvalidAccountDirectoryName = "__invalid_account__";
+
+// True when `directory_path` names the sentinel above. Callers about to WRITE must refuse; callers
+// merely reading get a path that does not exist, which is harmless.
+bool is_invalid_account_storage_directory(const std::string& directory_path);
+
 std::string account_bucket_for_name(const std::string& name);
 std::string legacy_player_file_path(const std::string& root_directory, const std::string& character_name);
 std::string legacy_object_file_path(const std::string& root_directory, const std::string& character_name);

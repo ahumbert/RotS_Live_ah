@@ -470,15 +470,19 @@ bool create_account(const std::string& root_directory, const std::string& accoun
     // index knows it is unusable. Without this, a future direct caller would create a fresh account
     // straight over a real player's record. Reached today only via create_account_for_email, whose
     // own guard has already refused, so this changes no live behaviour.
-    if (account_index::is_enabled() && account_index::matches_root(root_directory) && account_index::is_quarantined(email)) {
+    if (account_index_is_authoritative_for(root_directory) && account_index::is_quarantined(email)) {
         set_error(error_message, "That email address cannot be used right now.");
         return false;
     }
 
-    std::string storage_error;
-    if (account_storage_contains_unreadable_records(root_directory, &storage_error)) {
-        set_error(error_message, storage_error);
-        return false;
+    // The quadratic this whole index exists to remove; see create_account_for_email for the
+    // reasoning, which applies identically here.
+    if (!account_index_is_authoritative_for(root_directory)) {
+        std::string storage_error;
+        if (account_storage_contains_unreadable_records(root_directory, &storage_error)) {
+            set_error(error_message, storage_error);
+            return false;
+        }
     }
 
     AccountData existing_email_account;
@@ -524,15 +528,38 @@ bool create_account_for_email(const std::string& root_directory, const std::stri
     // address is free" and let a new account overwrite a real player's unparseable-but-real record.
     // Guarded the same way as the resolver fast paths: the index only speaks for the tree it was
     // built against.
-    if (account_index::is_enabled() && account_index::matches_root(root_directory) && account_index::is_quarantined(email)) {
+    if (account_index_is_authoritative_for(root_directory) && account_index::is_quarantined(email)) {
         set_error(error_message, "That email address cannot be used right now.");
         return false;
     }
 
-    std::string storage_error;
-    if (account_storage_contains_unreadable_records(root_directory, &storage_error)) {
-        set_error(error_message, storage_error);
-        return false;
+    // THE quadratic. account_storage_contains_unreadable_records opens and JSON-parses EVERY
+    // account record on the box, and this is an unauthenticated path -- anyone who can reach the
+    // login prompt can make the single-threaded pulse loop do it, once per attempt, stalling every
+    // player in the game. N creations cost N full parse-walks.
+    //
+    // With the index authoritative the walk answers a question the index has already answered.
+    // After the boot sweep every record on disk has been VISITED: readable ones are indexed and
+    // unreadable ones are quarantined (which is what this wave's shared-classifier change
+    // guarantees -- an unreadable candidate is visited, not skipped), and boot refuses to run at
+    // all past MAX_QUARANTINED_RECORDS_AT_BOOT. So the guard's real question, "is there a record we
+    // cannot read that the index does not already know about", is answered "no" by construction,
+    // and its escape hatch would have skipped every record it found anyway.
+    //
+    // What the guard was actually protecting -- creating a fresh account straight over a real
+    // player's unparseable record -- is protected per address, twice over and without a walk: the
+    // is_quarantined() refusal directly above reserves the address of every record boot could not
+    // read, and write_account_file refuses with "Existing account file could not be read safely."
+    // if anything unreadable is sitting at the destination path. That second one also covers the
+    // residual case the index cannot see, a record that becomes unreadable AFTER boot.
+    //
+    // The disabled path keeps the full scan: that is the rollback behaviour, unchanged.
+    if (!account_index_is_authoritative_for(root_directory)) {
+        std::string storage_error;
+        if (account_storage_contains_unreadable_records(root_directory, &storage_error)) {
+            set_error(error_message, storage_error);
+            return false;
+        }
     }
 
     AccountData existing_account;

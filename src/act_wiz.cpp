@@ -3280,6 +3280,11 @@ ACMD(do_account)
                     // record that was really right there on disk.
                     entry.normalized_email = account::account_index_quarantine_key(record);
                     entry.normalized_account_name = account::normalize_account_name(record.account.account_name);
+                    // The character keys this record lists, so rebuild_report can compare the keys
+                    // that actually drift. Empty for an unparsed record, which is right: nothing
+                    // was learned about its characters, and rebuild_report skips a quarantined
+                    // record's character comparison anyway.
+                    entry.character_keys = record.account.characters;
                     records_on_disk.push_back(entry);
                 },
                 &enum_error);

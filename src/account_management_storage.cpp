@@ -192,10 +192,6 @@ bool write_account_file(const std::string& root_directory, const AccountData& ac
     if (!create_directory_if_missing(account_directory, error_message))
         return false;
 
-    FILE* file = open_secure_output_file(temp_path, error_message);
-    if (file == nullptr)
-        return false;
-
     AccountData normalized_account = account;
     normalized_account.account_name = normalize_account_name(account.account_name);
     normalized_account.normalized_email = normalized_email;
@@ -208,6 +204,14 @@ bool write_account_file(const std::string& root_directory, const AccountData& ac
             link.object_path = expected_object_path;
     }
 
+    // Both refusals below happen BEFORE the temp file is opened, deliberately. They used to sit
+    // after open_secure_output_file and returned without fclose() and without removing
+    // "<final>.tmp", so every one of them leaked a descriptor and left a stray temp file behind.
+    // This function runs on every successful login (clear_account_login_failures), so a single
+    // account whose record will not parse leaked one descriptor per login attempt and walked a
+    // process that runs for weeks towards EMFILE -- at which point the server can neither accept
+    // connections nor write player files. Nothing between here and the open touches the
+    // filesystem, so moving the checks up changes no on-disk ordering on the success path.
     if (path_exists(final_path)) {
         AccountData existing_account_at_target;
         if (!read_account_file_from_path(final_path, &existing_account_at_target, nullptr)) {
@@ -220,6 +224,10 @@ bool write_account_file(const std::string& root_directory, const AccountData& ac
             return false;
         }
     }
+
+    FILE* file = open_secure_output_file(temp_path, error_message);
+    if (file == nullptr)
+        return false;
 
     const std::string json = serialize_account_to_json(normalized_account);
 
@@ -326,8 +334,8 @@ bool for_each_account_record_on_disk(const std::string& root_directory,
 
     while (dirent* bucket_entry = readdir(accounts_dir)) {
         // Skip "." / ".." and any other hidden entry (e.g. a stray .DS_Store or editor swap file) --
-        // this mirrors the boot walker this function replaces, which never treated a dotfile bucket
-        // as an account record to report.
+        // classify_bucket_entry applies the same rule to the entries inside a bucket, so both
+        // walkers agree that the whole dotfile class is litter.
         if (bucket_entry->d_name[0] == '.')
             continue;
 
@@ -337,71 +345,56 @@ bool for_each_account_record_on_disk(const std::string& root_directory,
             continue;
 
         DIR* bucket_dir = opendir(bucket_path.c_str());
-        if (bucket_dir == nullptr)
+        if (bucket_dir == nullptr) {
+            // A bucket that will not open is EVERY account in it leaving the index at once, and
+            // account_storage_contains_unreadable_records hard-fails on the same condition. Skipping
+            // it silently here left a state where the guard refused every registration on the server
+            // while nothing was quarantined, nothing was logged and `account index verify` reported
+            // agreement. Visit it as one unreadable record instead: that is what makes it visible in
+            // `account index`, counted at boot, and armed as the guard's escape hatch. Keyed by the
+            // bucket's own path -- see account_index_key_for_unreadable_bucket.
+            AccountRecordOnDisk record;
+            record.directory_entry_name = bucket_entry->d_name;
+            record.record_path = bucket_path;
+            record.directory_layout = false;
+            record.parsed = false;
+            record.failure_reason = "Failed to open account bucket directory '" + bucket_path + "': " + std::strerror(errno);
+            visitor(record);
             continue;
+        }
 
         while (dirent* account_entry = readdir(bucket_dir)) {
-            if (account_entry->d_name[0] == '.')
+            // One shared rule for "what is even a record", used by this walker and by
+            // account_storage_contains_unreadable_records. Litter is not visited at all, so it never
+            // counts against MAX_QUARANTINED_RECORDS_AT_BOOT; a candidate that cannot be stat'ed is
+            // VISITED with parsed == false, which is what quarantines it.
+            const BucketEntryClassification classification = classify_bucket_entry(bucket_path, account_entry->d_name);
+            if (classification.kind == BucketEntryKind::NotARecord)
                 continue;
-
-            const std::string entry_path = bucket_path + "/" + account_entry->d_name;
-            // One stat, two decisions. is_directory_bucket_entry() would stat this same entry for
-            // the directory question and then the ".json" suffix test below would have decided the
-            // regular-file question without stat-ing at all -- which is how a non-regular ".json"
-            // entry (a dangling symlink, a fifo) used to get through: visited as a candidate here,
-            // then rejected inside read_account_file_from_bucket_entry, which tests
-            // S_ISREG && suffix. Keeping both walkers' idea of "what is even a record" identical is
-            // the point; see the S_ISREG test in the else branch below.
-            struct stat entry_info { };
-            if (stat(entry_path.c_str(), &entry_info) != 0)
-                continue;
-            const bool is_directory_entry = S_ISDIR(entry_info.st_mode);
-
-            // Only visit genuine CANDIDATE records: a directory whose account.json exists, or a
-            // regular file whose name ends in ".json". Everything else is filesystem litter, not an
-            // account record -- most notably a directory with no account.json yet, which is a normal
-            // transient artifact (write_account_file creates the account directory before it writes
-            // the temp file, so a crash between those two steps leaves one behind). Litter must not
-            // be visited at all, so it never counts against MAX_QUARANTINED_RECORDS_AT_BOOT. A
-            // candidate that then fails to parse still gets visited with parsed == false below.
-            std::string candidate_record_path;
-            if (is_directory_entry) {
-                const std::string account_json_path = entry_path + "/account.json";
-                struct stat account_json_info { };
-                if (stat(account_json_path.c_str(), &account_json_info) != 0)
-                    continue;
-                candidate_record_path = account_json_path;
-            } else {
-                // S_ISREG, not merely "not a directory": read_account_file_from_bucket_entry reads
-                // only regular files, so without this a dangling symlink or a fifo named "x.json"
-                // would be visited as a candidate, fail inside that reader, and be quarantined --
-                // counting against MAX_QUARANTINED_RECORDS_AT_BOOT, six of them refusing a boot,
-                // over filesystem litter that account_storage_contains_unreadable_records does not
-                // consider a record at all.
-                const std::string file_name = account_entry->d_name;
-                if (!S_ISREG(entry_info.st_mode))
-                    continue;
-                if (!(file_name.length() >= 6 && file_name.compare(file_name.length() - 5, 5, ".json") == 0))
-                    continue;
-                candidate_record_path = entry_path;
-            }
 
             AccountRecordOnDisk record;
             record.directory_entry_name = account_entry->d_name;
-            record.record_path = candidate_record_path;
-            record.directory_layout = is_directory_entry;
+            record.record_path = classification.record_path;
+            record.directory_layout = classification.directory_layout;
+
+            if (classification.kind == BucketEntryKind::Unreadable) {
+                record.parsed = false;
+                record.failure_reason = classification.failure_reason;
+                visitor(record);
+                continue;
+            }
 
             AccountData parsed_account;
             std::string read_error;
-            if (read_account_file_from_bucket_entry(bucket_path, *account_entry, &parsed_account, &read_error)) {
+            if (read_account_file_from_path(classification.record_path, &parsed_account, &read_error)) {
                 record.parsed = true;
                 record.account = std::move(parsed_account);
             } else {
                 record.parsed = false;
-                // Never an empty reason. The reader can return false without setting a message (a
-                // stat that fails between our stat above and its own), and an empty reason becomes a
-                // log line and a wizard "QUARANTINED <path>: " line that trail off into nothing --
-                // the one piece of evidence about a record we refused, with the evidence missing.
+                // Never an empty reason. The reader can return false without setting a message, and
+                // an empty reason becomes a log line and a wizard "QUARANTINED <path>: " line that
+                // trail off into nothing -- the one piece of evidence about a record we refused,
+                // with the evidence missing.
                 record.failure_reason = read_error.empty() ? "Account record could not be read." : read_error;
             }
 
@@ -435,8 +428,15 @@ std::string account_character_directory(const std::string& root_directory, const
 {
     const std::string account_storage_key = resolve_account_storage_key(root_directory, account_name);
     if (account_storage_key.empty())
-        return root_directory + "/accounts/__invalid_account__";
+        return root_directory + "/accounts/" + std::string(kInvalidAccountDirectoryName);
     return root_directory + "/accounts/" + account_bucket_for_name(account_storage_key) + "/" + account_storage_key;
+}
+
+bool is_invalid_account_storage_directory(const std::string& directory_path)
+{
+    const size_t separator = directory_path.find_last_of('/');
+    const std::string leaf = (separator == std::string::npos) ? directory_path : directory_path.substr(separator + 1);
+    return leaf == kInvalidAccountDirectoryName;
 }
 
 std::string account_character_snapshot_path(const std::string& root_directory, const std::string& account_name, const std::string& character_name)

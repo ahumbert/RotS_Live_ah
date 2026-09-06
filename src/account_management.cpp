@@ -773,55 +773,138 @@ namespace {
         return "";
     }
 
-    bool read_account_file_from_bucket_entry(const std::string& bucket_path, const dirent& account_entry, AccountData* account, std::string* error_message)
+    // --- What a bucket entry IS ------------------------------------------------------------------
+    //
+    // Decided in exactly one place, because two walkers depend on the answer and must not disagree.
+    // for_each_account_record_on_disk (account_management_storage.cpp) decides what the INDEX sees;
+    // account_storage_contains_unreadable_records decides whether account creation is allowed at
+    // all. Every historical disagreement between them produced the same outcome: a record the guard
+    // called unreadable that nothing quarantined, so neither of the guard's escape hatches fired and
+    // EVERY registration on the server was refused, permanently, with nothing logged, `account
+    // index` showing 0 quarantined, and `account index verify` reporting agreement.
+    enum class BucketEntryKind {
+        // Filesystem litter. Never visited by the enumerator (so it cannot count towards
+        // MAX_QUARANTINED_RECORDS_AT_BOOT) and never a record the creation guard may refuse over.
+        NotARecord,
+        // The directory layout: <bucket>/<email>/account.json.
+        DirectoryRecord,
+        // The legacy flat layout: <bucket>/<name>.json, a regular file.
+        FlatRecord,
+        // Candidate-shaped but we could not even stat it: EACCES from a bad umask on a manual SFTP
+        // deploy or a partial restore, ELOOP, EIO, ENAMETOOLONG. This is a record we cannot read,
+        // NOT litter. ENOENT is the only errno that means "this name does not resolve to anything",
+        // and that one lands in NotARecord above.
+        Unreadable,
+    };
+
+    struct BucketEntryClassification {
+        BucketEntryKind kind = BucketEntryKind::NotARecord;
+        // The JSON that holds the record. For Unreadable it is whichever path the stat actually
+        // failed on, so the quarantine key and the log line name the thing that could not be read.
+        std::string record_path;
+        // Set only for Unreadable.
+        std::string failure_reason;
+        // Whether the entry is KNOWN to be a directory. False for an entry we could not stat at all
+        // -- we genuinely do not know -- which is what keeps the quarantine key path-shaped for that
+        // case; see account_index_quarantine_key.
+        bool directory_layout = false;
+    };
+
+    BucketEntryClassification classify_bucket_entry(const std::string& bucket_path, const char* entry_name)
     {
-        const std::string entry_path = bucket_path + "/" + account_entry.d_name;
+        BucketEntryClassification classification;
+
+        // Hidden entries are litter to BOTH walkers. "." and ".." are the obvious pair, but the ones
+        // that actually turn up are a macOS AppleDouble "._account.json" left by an rsync, an editor
+        // swap file, a .DS_Store. The enumerator has always skipped every dotfile while the guard
+        // skipped only "." and "..", so one stray AppleDouble refused every registration on the box.
+        if (entry_name == nullptr || entry_name[0] == '.')
+            return classification;
+
+        const std::string entry_path = bucket_path + "/" + entry_name;
         struct stat entry_info { };
         if (stat(entry_path.c_str(), &entry_info) != 0) {
-            // ENOENT here means the entry readdir just handed us does not resolve to anything --
-            // in practice a dangling symlink, since stat() follows the link. That is litter, not a
-            // record, and it must say so with the sentinel every caller keys off. Returning false
-            // with error_message untouched made account_storage_contains_unreadable_records treat
-            // it as a record it could not read, which refuses EVERY new account with "Existing
-            // account records could not be read safely." -- permanently, with nothing quarantined,
-            // nothing logged, and `account index verify` reporting agreement.
-            //
-            // ENOENT ONLY. Any other stat failure (EACCES on a record we are not allowed to read,
-            // EIO, ELOOP) is a real record we cannot read, and must keep being reported as one.
+            // ENOENT means the name readdir handed us does not resolve to anything -- in practice a
+            // dangling symlink, since stat() follows the link. That is litter.
             if (errno == ENOENT)
-                set_error(error_message, "Entry is not an account record.");
-            return false;
+                return classification;
+
+            classification.kind = BucketEntryKind::Unreadable;
+            classification.record_path = entry_path;
+            classification.failure_reason = "Failed to stat account record '" + entry_path + "': " + std::strerror(errno);
+            return classification;
         }
 
         if (S_ISDIR(entry_info.st_mode)) {
+            classification.directory_layout = true;
             const std::string account_json_path = entry_path + "/account.json";
             struct stat account_json_info { };
             if (stat(account_json_path.c_str(), &account_json_info) != 0) {
+                // A directory with no account.json yet is a normal transient artifact:
+                // write_account_file creates the account directory before it writes the temp file,
+                // so a crash between those two steps leaves one behind. Litter.
                 if (errno == ENOENT) {
-                    set_error(error_message, "Entry is not an account record.");
-                    return false;
+                    classification.directory_layout = false;
+                    return classification;
                 }
 
-                set_error(error_message, "Failed to stat account file '" + account_json_path + "': " + std::strerror(errno));
-                return false;
+                // Anything else -- most reachably an account directory whose search bit a bad umask
+                // or a partial restore stripped -- is a real player's record we cannot read. Keeping
+                // directory_layout true is what makes the quarantine key the email directory's own
+                // name, so the owner's ADDRESS stays reserved rather than being handed to the next
+                // person who registers with it.
+                classification.kind = BucketEntryKind::Unreadable;
+                classification.record_path = account_json_path;
+                classification.failure_reason = "Failed to stat account file '" + account_json_path + "': " + std::strerror(errno);
+                return classification;
             }
 
-            return read_account_file_from_path(account_json_path, account, error_message);
+            classification.kind = BucketEntryKind::DirectoryRecord;
+            classification.record_path = account_json_path;
+            return classification;
         }
 
-        const std::string file_name = account_entry.d_name;
-        if (S_ISREG(entry_info.st_mode) && file_name.length() >= 6 && file_name.substr(file_name.length() - 5) == ".json")
-            return read_account_file_from_path(entry_path, account, error_message);
+        // S_ISREG, not merely "not a directory": a fifo or a device node named "x.json" is litter,
+        // not a record either walker can read.
+        if (!S_ISREG(entry_info.st_mode))
+            return classification;
 
-        set_error(error_message, "Entry is not an account record.");
-        return false;
+        const std::string file_name = entry_name;
+        if (!(file_name.length() >= 6 && file_name.compare(file_name.length() - 5, 5, ".json") == 0))
+            return classification;
+
+        classification.kind = BucketEntryKind::FlatRecord;
+        classification.record_path = entry_path;
+        return classification;
+    }
+
+    bool read_account_file_from_bucket_entry(const std::string& bucket_path, const dirent& account_entry, AccountData* account, std::string* error_message)
+    {
+        const BucketEntryClassification classification = classify_bucket_entry(bucket_path, account_entry.d_name);
+        switch (classification.kind) {
+        case BucketEntryKind::NotARecord:
+            // The sentinel every caller keys off. Returning false with error_message untouched made
+            // account_storage_contains_unreadable_records treat litter as a record it could not
+            // read, which refuses EVERY new account.
+            set_error(error_message, "Entry is not an account record.");
+            return false;
+        case BucketEntryKind::Unreadable:
+            set_error(error_message, classification.failure_reason);
+            return false;
+        case BucketEntryKind::DirectoryRecord:
+        case BucketEntryKind::FlatRecord:
+            break;
+        }
+
+        return read_account_file_from_path(classification.record_path, account, error_message);
     }
 
     bool is_directory_bucket_entry(const std::string& bucket_path, const dirent& account_entry)
     {
-        const std::string entry_path = bucket_path + "/" + account_entry.d_name;
-        struct stat entry_info { };
-        return stat(entry_path.c_str(), &entry_info) == 0 && S_ISDIR(entry_info.st_mode);
+        // Expressed through the shared classifier rather than a second stat with its own rule --
+        // the two walkers disagreeing about "is this a directory record" is the same class of bug
+        // as them disagreeing about "is this a record at all".
+        return classify_bucket_entry(bucket_path, account_entry.d_name).directory_layout;
     }
 
     bool find_account_file_path_by_account_name(const std::string& root_directory, const std::string& account_name, std::string* account_path, std::string* error_message)
@@ -1110,21 +1193,60 @@ namespace {
     // The index key a bucket entry that FAILED to parse is (or would be) filed under. Expressed
     // through account_index_quarantine_key rather than restating its rule: for the directory layout
     // the key is the entry name, for a legacy flat file it is the file's own path -- and an unparsed
-    // record discloses no email, so neither shape needs the record read. `record_path` is composed
-    // exactly as for_each_account_record_on_disk composes it for a flat candidate; the directory
-    // shape never consults it.
-    std::string account_index_key_for_unparsed_bucket_entry(const std::string& bucket_path, const dirent& account_entry)
+    // record discloses no email, so neither shape needs the record read. Takes the shared
+    // classification so this and for_each_account_record_on_disk cannot key the same entry
+    // differently; keying it differently is how `account index verify` twice reported false drift
+    // for a record that was really right there on disk.
+    std::string account_index_key_for_unparsed_bucket_entry(const std::string& entry_name,
+        const BucketEntryClassification& classification)
     {
         AccountRecordOnDisk record;
-        record.directory_entry_name = account_entry.d_name;
-        record.record_path = bucket_path + "/" + account_entry.d_name;
-        record.directory_layout = is_directory_bucket_entry(bucket_path, account_entry);
+        record.directory_entry_name = entry_name;
+        record.record_path = classification.record_path;
+        record.directory_layout = classification.directory_layout;
         record.parsed = false;
         return account_index_quarantine_key(record);
     }
 
+    // The key for_each_account_record_on_disk files a bucket it could not open() under: the bucket's
+    // own path, path-shaped like the other two unparsed shapes. A whole bucket that will not open is
+    // every account in it leaving the index at once, so it has to be quarantined (visible, counted,
+    // and armed as an escape hatch here) rather than silently skipped by one walker and treated as
+    // fatal by the other.
+    std::string account_index_key_for_unreadable_bucket(const std::string& bucket_path)
+    {
+        AccountRecordOnDisk record;
+        record.record_path = bucket_path;
+        record.directory_layout = false;
+        record.parsed = false;
+        return account_index_quarantine_key(record);
+    }
+
+    // "The index speaks for this tree": enabled AND built against this root. Every fast path in this
+    // file is guarded by exactly this pair -- the index holds paths and keys for one tree only, so
+    // answering a caller working against a different root would hand back this tree's answers.
+    bool account_index_is_authoritative_for(const std::string& root_directory)
+    {
+        return account_index::is_enabled() && account_index::matches_root(root_directory);
+    }
+
     bool account_storage_contains_unreadable_records(const std::string& root_directory, std::string* error_message)
     {
+        // A record the index already quarantined is a known-bad record the game has deliberately
+        // chosen to run with: boot logged it, counted it, reserved its email against exactly the
+        // overwrite this function guards, and refused to continue at all past
+        // MAX_QUARANTINED_RECORDS_AT_BOOT. Reporting it here as well would stop EVERY player from
+        // creating an account until an operator noticed one bad file -- the whole outcome quarantine
+        // exists to avoid.
+        //
+        // Be honest about the reachability: both live callers (create_account,
+        // create_account_for_email) now SKIP this whole walk when the index is authoritative, so as
+        // things stand this flag is always false and the escape hatches below never fire. They are
+        // kept because they are the correct behaviour for any caller that runs this scan with the
+        // index on, and because deleting them would make re-adding such a caller silently refuse
+        // every registration -- which is the exact bug this wave is fixing.
+        const bool index_is_authority = account_index_is_authoritative_for(root_directory);
+
         const std::string accounts_directory = root_directory + "/accounts";
         DIR* accounts_dir = opendir(accounts_directory.c_str());
         if (accounts_dir == nullptr) {
@@ -1138,7 +1260,9 @@ namespace {
         }
 
         while (dirent* bucket_entry = readdir(accounts_dir)) {
-            if (std::strcmp(bucket_entry->d_name, ".") == 0 || std::strcmp(bucket_entry->d_name, "..") == 0)
+            // Every hidden entry, not just "." and "..": the enumerator has always skipped the whole
+            // dotfile class, and the two walkers must agree about what is even a candidate.
+            if (bucket_entry->d_name[0] == '.')
                 continue;
 
             const std::string bucket_path = accounts_directory + "/" + bucket_entry->d_name;
@@ -1148,39 +1272,35 @@ namespace {
 
             DIR* bucket_dir = opendir(bucket_path.c_str());
             if (bucket_dir == nullptr) {
+                if (index_is_authority
+                    && account_index::is_quarantined_record_key(account_index_key_for_unreadable_bucket(bucket_path)))
+                    continue;
+
                 closedir(accounts_dir);
                 set_error(error_message, "Failed to open account bucket directory '" + bucket_path + "': " + std::strerror(errno));
                 return true;
             }
 
             while (dirent* account_entry = readdir(bucket_dir)) {
-                if (std::strcmp(account_entry->d_name, ".") == 0 || std::strcmp(account_entry->d_name, "..") == 0)
+                const BucketEntryClassification classification = classify_bucket_entry(bucket_path, account_entry->d_name);
+                if (classification.kind == BucketEntryKind::NotARecord)
                     continue;
 
-                AccountData stored_account;
-                std::string read_error;
-                if (!read_account_file_from_bucket_entry(bucket_path, *account_entry, &stored_account, &read_error)) {
-                    if (read_error == "Entry is not an account record.")
+                if (classification.kind != BucketEntryKind::Unreadable) {
+                    AccountData stored_account;
+                    if (read_account_file_from_path(classification.record_path, &stored_account, nullptr))
                         continue;
-
-                    // A record the index already quarantined is a known-bad record the game has
-                    // deliberately chosen to run with: boot logged it, counted it, reserved its
-                    // email against exactly the overwrite this function guards, and refused to
-                    // continue at all past MAX_QUARANTINED_RECORDS_AT_BOOT. Reporting it here as
-                    // well would stop EVERY player from creating an account until an operator
-                    // noticed one bad file -- the whole outcome quarantine exists to avoid. Behaviour
-                    // is unchanged when the index is off or belongs to another tree: it is then not
-                    // an authority on what is known-bad, and this stays the pre-branch scan.
-                    if (account_index::is_enabled() && account_index::matches_root(root_directory)
-                        && account_index::is_quarantined_record_key(
-                            account_index_key_for_unparsed_bucket_entry(bucket_path, *account_entry)))
-                        continue;
-
-                    closedir(bucket_dir);
-                    closedir(accounts_dir);
-                    set_error(error_message, "Existing account records could not be read safely.");
-                    return true;
                 }
+
+                if (index_is_authority
+                    && account_index::is_quarantined_record_key(
+                        account_index_key_for_unparsed_bucket_entry(account_entry->d_name, classification)))
+                    continue;
+
+                closedir(bucket_dir);
+                closedir(accounts_dir);
+                set_error(error_message, "Existing account records could not be read safely.");
+                return true;
             }
 
             closedir(bucket_dir);
