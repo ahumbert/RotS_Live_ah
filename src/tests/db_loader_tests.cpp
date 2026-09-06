@@ -1,3 +1,4 @@
+#include "../account_index.h"
 #include "../account_management.h"
 #include "../char_utils.h"
 #include "../color.h"
@@ -849,6 +850,72 @@ TEST(DbLoader, BuildPlayerIndexIncludesLegacyAndAccountNativeCharacters)
     EXPECT_STREQ(loaded_character.name, "legolas");
     EXPECT_EQ(loaded_character.specials2.idnum, 222);
     EXPECT_EQ(loaded_character.player_index, 1);
+}
+
+TEST(DbLoader, BuildPlayerIndexKeepsTheAccountUsableWhenOneCharacterFileIsUnreadable)
+{
+    // One unreadable <name>.character.json must not lock its owner out of the whole account. The
+    // boot walker used to quarantine the ACCOUNT for a per-character asset failure, which erases the
+    // account's keys and reserves its email -- so a single bad character file locked the player out
+    // of every other character they own, and refused their address for account creation, over a file
+    // that says nothing about the account record's own integrity. And it is reachable: one unknown
+    // skill/slot/flag NAME rejects an entire character file in this codebase.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+    ScopedPlayerTableReset player_table_reset;
+    account_index::clear();
+
+    ASSERT_EQ(mkdir("players", 0700), 0);
+    ASSERT_EQ(mkdir("players/A-E", 0700), 0);
+    ASSERT_EQ(mkdir("players/F-J", 0700), 0);
+    ASSERT_EQ(mkdir("players/K-O", 0700), 0);
+    ASSERT_EQ(mkdir("players/P-T", 0700), 0);
+    ASSERT_EQ(mkdir("players/U-Z", 0700), 0);
+    ASSERT_EQ(mkdir("accounts", 0700), 0);
+    ASSERT_EQ(mkdir("accounts/A-E", 0700), 0);
+    ASSERT_EQ(mkdir("accounts/P-T", 0700), 0);
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(".", "twochar", "player@example.com", "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_link_character(".", "twochar", "legolas", 1700010102, nullptr, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_link_character(".", "twochar", "gimli", 1700010103, nullptr, &error_message)) << error_message;
+
+    char_file_u good_character = make_stored_character("legolas");
+    good_character.specials2.idnum = 222;
+    ASSERT_TRUE(account::write_account_character_file(".", "twochar", good_character, &error_message)) << error_message;
+
+    char_file_u broken_character = make_stored_character("gimli");
+    broken_character.specials2.idnum = 223;
+    ASSERT_TRUE(account::write_account_character_file(".", "twochar", broken_character, &error_message)) << error_message;
+    // Present (so the walker's "does it exist?" branch says yes) but unreadable -- the shape a
+    // character file with one unrecognised skill name has.
+    write_file(account::account_character_player_path(".", "twochar", "gimli"),
+        "{ this is not valid character json");
+
+    // Cleared last, so what the boot walk itself produced is what the assertions below observe
+    // rather than the upserts create_account/admin_link_character did during setup.
+    account_index::clear();
+    build_player_index();
+
+    EXPECT_EQ(account_index::quarantined_count(), 0u)
+        << "a bad character file is not the ACCOUNT failing to parse";
+
+    std::string record_path;
+    EXPECT_TRUE(account_index::find_path_by_email("player@example.com", &record_path, nullptr))
+        << "the owner must still be able to log in";
+    EXPECT_TRUE(account_index::find_path_by_account_name("twochar", &record_path, nullptr));
+
+    std::string owner_email;
+    EXPECT_TRUE(account_index::find_owner_email_by_character("legolas", &owner_email, nullptr))
+        << "the account's OTHER characters must still resolve, or their saves stop";
+    EXPECT_EQ(owner_email, "player@example.com");
+
+    // The broken character is simply absent from the player index -- which is what the log line the
+    // walker still prints is evidence of.
+    ASSERT_EQ(top_of_p_table, 0);
+    EXPECT_STREQ(player_table[0].name, "legolas");
+
+    account_index::clear();
 }
 
 TEST(DbLoader, BuildPlayerIndexFailsClosedWhenAccountNativePathDoesNotFitPlayerIndex)

@@ -2,8 +2,11 @@
 
 #include "account_management_identity.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <map>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -22,14 +25,28 @@ namespace {
     std::unordered_map<std::string, std::string> g_characters;
     // email -> the character keys that email currently owns, so upsert can drop what it no longer owns.
     std::unordered_map<std::string, std::vector<std::string>> g_owned_characters;
+    // --- Contention -----------------------------------------------------------------------------
+    // Two records claiming one key is not merely ambiguous, it is dangerous, so the lookups refuse.
+    // What matters just as much is that the refusal LOWERS again once the duplicate is repaired: a
+    // contested character key makes save_char write nothing for that character, silently and to the
+    // log only, so a flag that only clear() could reset would keep eating a player's progress long
+    // after an operator fixed the data on disk.
+    //
+    // So contention is tracked as the set of CLAIMANTS, not as a bare flag, and "contested" is
+    // simply "more than one claimant". The uncontested case -- every key, essentially always -- pays
+    // nothing for this: it stays a single entry in the plain key -> owner maps above, and a key only
+    // moves into one of the maps below when a second, different claimant actually turns up. A key is
+    // in exactly one of the two places, never both.
+    using ClaimantSet = std::set<std::string>;
+
     // Account names claimed by more than one email. A map cannot represent that, and silently
     // resolving to whichever record was upserted last is destructive, not merely lossy:
     // write_account_file std::remove()s the path find_account_file_path_by_account_name returns when
     // it differs from the target (account_management_storage.cpp:240-245), so the record that lost
     // the race would have its file deleted. The directory scan refused to answer at all in this
     // situation, and so does the index -- see find_path_by_account_name.
-    std::unordered_set<std::string> g_ambiguous_account_names;
-    // Character keys claimed by more than one account record. Same shape as the account-name set
+    std::unordered_map<std::string, ClaimantSet> g_contested_account_names;
+    // Character keys claimed by more than one account record. Same shape as the account-name map
     // above and the same reason for existing, except that the consequence is worse: save_char
     // (db.cpp:3269-3296) chooses the directory it writes a character file into from the owner this
     // index resolves, and the branch at db.cpp:3286 CREATES that file when the resolved account has
@@ -37,20 +54,20 @@ namespace {
     // into an account that does not own the character, and would flip on every write to either
     // record. find_character_owner_account refused to answer here, and so does
     // find_owner_email_by_character.
-    //
-    // Sticky until clear(): once two records claim a character, nothing short of a reboot un-flags
-    // it. That is deliberate and matches g_ambiguous_account_names. Only the boot walk can produce
-    // this state today -- admin_link_character/admin_link_and_migrate_character
-    // (account_management_identity.cpp:983,1019) refuse to link a character another account already
-    // owns -- so a live write cannot raise the flag, and the state it describes is on disk and has
-    // to be repaired there.
-    std::unordered_set<std::string> g_ambiguous_characters;
+    std::unordered_map<std::string, ClaimantSet> g_contested_characters;
     // Emails claimed by more than one record under different account names. Mirrors
     // find_account_by_email_internal's own duplicate handling (account_management.cpp:1060-1075):
     // two records at one address are a duplicate only when their account NAMES differ; when they
     // agree it is the ordinary legacy-flat-plus-directory pair, which that scan deduplicates by
     // preferring the directory record and upsert's precedence rule resolves the same way.
-    std::unordered_set<std::string> g_ambiguous_emails;
+    //
+    // Claimants here are record PATHS rather than emails -- the email IS the key, and what disputes
+    // it is two files -- each carrying the account name its record declares, because "contested"
+    // for an address means the claims disagree about that name. The single-claimant case needs no
+    // storage at all: g_entries already holds one path and one account name per email, so a second
+    // claimant is what creates the map entry, and the claims collapse back out of it the moment a
+    // rewrite makes the names agree again.
+    std::unordered_map<std::string, std::map<std::string, std::string>> g_contested_emails;
 
     bool g_enabled = false;
     // The root directory every record_path in here was composed against. The resolvers ignore their
@@ -65,23 +82,101 @@ namespace {
             *error_message = text;
     }
 
+    // Records `owner` as a claimant of `key`. Uncontested keys stay in `owners` (one string, no
+    // allocation beyond the map node the old code already paid for); the second, DIFFERENT claimant
+    // is what promotes the key into `contested`.
+    void claim_key(std::unordered_map<std::string, std::string>& owners,
+        std::unordered_map<std::string, ClaimantSet>& contested, const std::string& key,
+        const std::string& owner)
+    {
+        const auto claims = contested.find(key);
+        if (claims != contested.end()) {
+            // Already contested by somebody else; this claimant joins them. It cannot drop back to
+            // one claimant by an insert, so there is nothing to collapse here.
+            claims->second.insert(owner);
+            return;
+        }
+
+        const auto existing = owners.find(key);
+        if (existing == owners.end()) {
+            owners[key] = owner;
+            return;
+        }
+        // The overwhelmingly common case: a record re-claiming its own key on every write. Must not
+        // look like a second claimant, or one save would break every later one.
+        if (existing->second == owner)
+            return;
+
+        ClaimantSet claimants;
+        claimants.insert(existing->second);
+        claimants.insert(owner);
+        owners.erase(existing);
+        contested.emplace(key, std::move(claimants));
+    }
+
+    // Withdraws `owner`'s claim on `key`. This is the half that makes contention self-healing: when
+    // the withdrawal leaves exactly one claimant the key goes back to being an ordinary resolvable
+    // entry, so repairing the duplicate on disk and writing the repaired record is enough -- no
+    // reboot.
+    void withdraw_key_claim(std::unordered_map<std::string, std::string>& owners,
+        std::unordered_map<std::string, ClaimantSet>& contested, const std::string& key,
+        const std::string& owner)
+    {
+        const auto claims = contested.find(key);
+        if (claims != contested.end()) {
+            claims->second.erase(owner);
+            if (claims->second.size() == 1)
+                owners[key] = *claims->second.begin();
+            if (claims->second.size() <= 1)
+                contested.erase(claims);
+            return;
+        }
+
+        const auto existing = owners.find(key);
+        // The value test matters: with contention the key may have been handed to somebody else
+        // since, and erasing it then would delete another record's key.
+        if (existing != owners.end() && existing->second == owner)
+            owners.erase(existing);
+    }
+
+    // Recomputes whether an email is contested from its claims, collapsing the map entry away when
+    // the claimants have stopped disagreeing (or when only one is left). Contested means the claims
+    // disagree about the ACCOUNT NAME, which is find_account_by_email_internal's own duplicate test.
+    void settle_email_claims(const std::string& email)
+    {
+        const auto claims = g_contested_emails.find(email);
+        if (claims == g_contested_emails.end())
+            return;
+
+        bool names_disagree = false;
+        for (const auto& claim : claims->second) {
+            if (claim.second != claims->second.begin()->second) {
+                names_disagree = true;
+                break;
+            }
+        }
+
+        if (!names_disagree || claims->second.size() <= 1)
+            g_contested_emails.erase(claims);
+    }
+
     // Drops every key owned by this email except the entry itself.
     void erase_owned_keys(const std::string& email)
     {
-        for (auto name_entry = g_account_names.begin(); name_entry != g_account_names.end();) {
-            if (name_entry->second == email)
-                name_entry = g_account_names.erase(name_entry);
-            else
-                ++name_entry;
+        // O(1) rather than a walk of every indexed account name: an email owns exactly one account
+        // name and the entry already stores it. This runs on every upsert, and upserts run on the
+        // login path (clear_account_login_failures fires on every successful login), so the walk was
+        // O(accounts) per login for a key we already had in hand.
+        const auto entry = g_entries.find(email);
+        if (entry != g_entries.end() && !entry->second.normalized_account_name.empty()) {
+            withdraw_key_claim(g_account_names, g_contested_account_names,
+                entry->second.normalized_account_name, email);
         }
 
         const auto owned = g_owned_characters.find(email);
         if (owned != g_owned_characters.end()) {
-            for (const std::string& character_key : owned->second) {
-                const auto character_entry = g_characters.find(character_key);
-                if (character_entry != g_characters.end() && character_entry->second == email)
-                    g_characters.erase(character_entry);
-            }
+            for (const std::string& character_key : owned->second)
+                withdraw_key_claim(g_characters, g_contested_characters, character_key, email);
             g_owned_characters.erase(owned);
         }
     }
@@ -99,21 +194,32 @@ void upsert(const account::AccountData& account, const std::string& record_path,
 
     const auto existing = g_entries.find(email);
     // Two DIFFERENT records at one address, disagreeing about the account name: the case
-    // find_account_by_email_internal refuses to answer for. Tested before the precedence return
-    // below, because the flat-record-ignored case is one of the two ways this arises. Three
-    // conditions, each load-bearing:
-    //   - a differing record_path is what makes this two records rather than one being rewritten.
-    //     A live write cannot fail it: final_path is composed purely from the email, so every
-    //     rewrite (an account rename included) lands on the path already indexed.
-    //   - a differing account name is the scan's own duplicate test; equal names are the ordinary
-    //     flat-plus-directory pair, deduplicated by precedence, not a duplicate.
-    //   - a quarantined incumbent is excluded: it holds no account name to compare and its email is
-    //     deliberately reserved, so "could not be read" must stay the answer for that address
-    //     rather than being reworded into a duplicate report.
-    if (existing != g_entries.end() && !existing->second.quarantined
+    // find_account_by_email_internal refuses to answer for. Handled before the precedence return
+    // below, because the flat-record-ignored case is one of the two ways this arises.
+    const auto email_claims = g_contested_emails.find(email);
+    if (email_claims != g_contested_emails.end()) {
+        // Already contested. Restate THIS path's claim and re-settle: when the rewrite brings the
+        // claims back into agreement about the account name, the address stops being contested and
+        // resolves again -- which is the whole point of holding claims rather than a flag.
+        email_claims->second[record_path] = normalized_account_name;
+        settle_email_claims(email);
+    } else if (existing != g_entries.end() && !existing->second.quarantined
         && existing->second.record_path != record_path
-        && existing->second.normalized_account_name != normalized_account_name)
-        g_ambiguous_emails.insert(email);
+        && existing->second.normalized_account_name != normalized_account_name) {
+        // Three conditions, each load-bearing:
+        //   - a differing record_path is what makes this two records rather than one being
+        //     rewritten. A live write cannot fail it: final_path is composed purely from the email,
+        //     so every rewrite (an account rename included) lands on the path already indexed.
+        //   - a differing account name is the scan's own duplicate test; equal names are the
+        //     ordinary flat-plus-directory pair, deduplicated by precedence, not a duplicate.
+        //   - a quarantined incumbent is excluded: it holds no account name to compare and its email
+        //     is deliberately reserved, so "could not be read" must stay the answer for that address
+        //     rather than being reworded into a duplicate report.
+        std::map<std::string, std::string> claims;
+        claims[existing->second.record_path] = existing->second.normalized_account_name;
+        claims[record_path] = normalized_account_name;
+        g_contested_emails.emplace(email, std::move(claims));
+    }
 
     // Directory-over-flat precedence: a legacy flat record must not displace a directory record (or
     // a quarantined directory record -- quarantine() leaves legacy_flat_layout at its default of
@@ -131,17 +237,14 @@ void upsert(const account::AccountData& account, const std::string& record_path,
     entry.legacy_flat_layout = legacy_flat_layout;
     g_entries[email] = entry;
 
-    if (!entry.normalized_account_name.empty()) {
-        // erase_owned_keys above already dropped any name key this email owned, so a key that is
-        // still here belongs to a DIFFERENT email: two records claim one account name. Record that
-        // and let the lookups refuse, exactly as the scan did. Two layouts of the SAME email are not
-        // a duplicate -- that case never reaches here, it is either the early return above or an
-        // email whose own key was just erased.
-        const auto existing_name = g_account_names.find(entry.normalized_account_name);
-        if (existing_name != g_account_names.end() && existing_name->second != email)
-            g_ambiguous_account_names.insert(entry.normalized_account_name);
-        g_account_names[entry.normalized_account_name] = email;
-    }
+    // erase_owned_keys above already withdrew every claim this email held, so claim_key sees this
+    // record as a fresh claimant of exactly the keys the record declares NOW. A key that is still
+    // held is held by a DIFFERENT email, and claim_key turns that into contention rather than
+    // overwriting -- overwriting an account name would let write_account_file delete the other
+    // record's file, and overwriting a character would send that character's saves to whichever
+    // record was written last.
+    if (!entry.normalized_account_name.empty())
+        claim_key(g_account_names, g_contested_account_names, entry.normalized_account_name, email);
 
     std::vector<std::string> owned;
     owned.reserve(account.characters.size());
@@ -149,14 +252,7 @@ void upsert(const account::AccountData& account, const std::string& record_path,
         const std::string character_key = account::normalize_account_name(character_name);
         if (character_key.empty())
             continue;
-        // erase_owned_keys above already dropped every character key this email owned, so a key
-        // still present belongs to a DIFFERENT email: two records claim one character. Record it and
-        // let find_owner_email_by_character refuse, exactly as the scan did -- overwriting instead
-        // would send this character's saves to whichever record was written last.
-        const auto existing_character = g_characters.find(character_key);
-        if (existing_character != g_characters.end() && existing_character->second != email)
-            g_ambiguous_characters.insert(character_key);
-        g_characters[character_key] = email;
+        claim_key(g_characters, g_contested_characters, character_key, email);
         owned.push_back(character_key);
     }
     g_owned_characters[email] = std::move(owned);
@@ -177,7 +273,15 @@ void quarantine(const std::string& normalized_email, const std::string& record_p
     if (normalized_email.empty())
         return;
 
+    // Withdraws the record's account-name and character claims as well as dropping its keys, so
+    // setting a duplicate record aside is itself a repair: the surviving claimant of a key the two
+    // disputed goes back to resolving immediately.
     erase_owned_keys(normalized_email);
+    // A quarantined record declares no usable account name, so it can no longer be one side of a
+    // "these two records disagree about the name at this address" dispute. Its email stays occupied
+    // by the entry below, and "could not be read" is the answer for that address from here on --
+    // which must not be reworded into a duplicate report.
+    g_contested_emails.erase(normalized_email);
 
     Entry entry;
     entry.normalized_email = normalized_email;
@@ -191,7 +295,7 @@ bool find_path_by_email(const std::string& email, std::string* record_path,
     std::string* error_message)
 {
     const std::string normalized_email = account::normalize_email(email);
-    if (g_ambiguous_emails.count(normalized_email) != 0) {
+    if (g_contested_emails.count(normalized_email) != 0) {
         // Verbatim find_account_by_email_internal's duplicate text (account_management.cpp:1073).
         set_error(error_message, "Multiple account records exist for that email address.");
         return false;
@@ -216,7 +320,7 @@ bool find_path_by_account_name(const std::string& account_name, std::string* rec
     std::string* error_message)
 {
     const std::string normalized_account_name = account::normalize_account_name(account_name);
-    if (g_ambiguous_account_names.count(normalized_account_name) != 0) {
+    if (g_contested_account_names.count(normalized_account_name) != 0) {
         // Verbatim find_account_file_path_by_account_name's duplicate text (account_management.cpp).
         // Returning a path here would let write_account_file delete the other record's file.
         set_error(error_message, "Multiple account records exist for account '" + normalized_account_name + "'.");
@@ -242,10 +346,10 @@ bool find_path_by_account_name(const std::string& account_name, std::string* rec
 }
 
 bool find_owner_email_by_character(const std::string& character_name, std::string* owner_email,
-    std::string* error_message)
+    std::string* error_message, std::string* owner_account_name)
 {
     const std::string character_key = account::normalize_account_name(character_name);
-    if (g_ambiguous_characters.count(character_key) != 0) {
+    if (g_contested_characters.count(character_key) != 0) {
         // Verbatim find_character_owner_account's duplicate text (account_management.cpp:979).
         // Setting a message is what makes this the ERROR form for the caller: the owner resolver
         // (account_management_identity.cpp:937-949) reads an EMPTY message as "resolved, this
@@ -269,6 +373,12 @@ bool find_owner_email_by_character(const std::string& character_name, std::strin
 
     if (owner_email != nullptr)
         *owner_email = character_entry->second;
+    // The owner's account name comes straight out of the entry rather than out of a re-read of the
+    // record: deserialize_account_from_json normalizes account_name with the same
+    // normalize_account_name() upsert applied (account_management_storage.cpp:151), so the two are
+    // byte-identical strings.
+    if (owner_account_name != nullptr)
+        *owner_account_name = entry->second.normalized_account_name;
     set_error(error_message, "");
     return true;
 }
@@ -277,7 +387,7 @@ bool find_email_by_account_name(const std::string& account_name, std::string* em
     std::string* error_message)
 {
     const std::string normalized_account_name = account::normalize_account_name(account_name);
-    if (g_ambiguous_account_names.count(normalized_account_name) != 0) {
+    if (g_contested_account_names.count(normalized_account_name) != 0) {
         set_error(error_message, "Multiple account records exist for account '" + normalized_account_name + "'.");
         return false;
     }
@@ -341,17 +451,56 @@ std::size_t size()
 
 bool is_account_name_ambiguous(const std::string& account_name)
 {
-    return g_ambiguous_account_names.count(account::normalize_account_name(account_name)) != 0;
+    return g_contested_account_names.count(account::normalize_account_name(account_name)) != 0;
 }
 
 bool is_character_ambiguous(const std::string& character_name)
 {
-    return g_ambiguous_characters.count(account::normalize_account_name(character_name)) != 0;
+    return g_contested_characters.count(account::normalize_account_name(character_name)) != 0;
 }
 
 bool is_email_ambiguous(const std::string& email)
 {
-    return g_ambiguous_emails.count(account::normalize_email(email)) != 0;
+    return g_contested_emails.count(account::normalize_email(email)) != 0;
+}
+
+std::vector<ContestedKey> contested_keys()
+{
+    std::vector<ContestedKey> contested;
+
+    for (const auto& claims : g_contested_characters) {
+        ContestedKey key;
+        key.kind = "character";
+        key.key = claims.first;
+        key.claimants.assign(claims.second.begin(), claims.second.end());
+        contested.push_back(std::move(key));
+    }
+
+    for (const auto& claims : g_contested_account_names) {
+        ContestedKey key;
+        key.kind = "account name";
+        key.key = claims.first;
+        key.claimants.assign(claims.second.begin(), claims.second.end());
+        contested.push_back(std::move(key));
+    }
+
+    for (const auto& claims : g_contested_emails) {
+        ContestedKey key;
+        key.kind = "email";
+        key.key = claims.first;
+        for (const auto& claim : claims.second)
+            key.claimants.push_back(claim.first);
+        contested.push_back(std::move(key));
+    }
+
+    // The maps are unordered, so without this the listing would shuffle between calls and an
+    // immortal comparing two runs could not tell a changed state from a reordered one.
+    std::sort(contested.begin(), contested.end(), [](const ContestedKey& left, const ContestedKey& right) {
+        if (left.kind != right.kind)
+            return left.kind < right.kind;
+        return left.key < right.key;
+    });
+    return contested;
 }
 
 void clear()
@@ -360,9 +509,9 @@ void clear()
     g_account_names.clear();
     g_characters.clear();
     g_owned_characters.clear();
-    g_ambiguous_account_names.clear();
-    g_ambiguous_characters.clear();
-    g_ambiguous_emails.clear();
+    g_contested_account_names.clear();
+    g_contested_characters.clear();
+    g_contested_emails.clear();
     g_root_directory = ".";
 }
 

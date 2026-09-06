@@ -3198,6 +3198,28 @@ ACMD(do_account)
             send_to_char(buf1, ch);
         }
 
+        // Contested keys have to be listed here alongside the quarantined ones. A contested
+        // character key makes save_char write NOTHING for that character -- silently, to the log
+        // only -- and `account index verify` reports agreement throughout, because the index and the
+        // disk agree perfectly about a genuine on-disk duplicate. Without this listing there is
+        // nowhere in the game that shows the state at all.
+        for (const account_index::ContestedKey& contested : account_index::contested_keys()) {
+            std::string claimants;
+            for (const std::string& claimant : contested.claimants) {
+                if (!claimants.empty())
+                    claimants += ", ";
+                claimants += claimant;
+            }
+            // snprintf, not sprintf: every field here is unbounded on principle -- the key is a
+            // character or account name off disk and the claimant list grows with the number of
+            // records disputing it -- and buf1 is a fixed MAX_STRING_LENGTH buffer. A contested key
+            // has two claimants in every case anyone has ever seen, so this truncates nothing in
+            // practice; it is here so the bound is real rather than asserted in a comment.
+            snprintf(buf1, MAX_STRING_LENGTH, "  CONTESTED %s '%s' claimed by: %s\n\r",
+                contested.kind.c_str(), contested.key.c_str(), claimants.c_str());
+            send_to_char(buf1, ch);
+        }
+
         if (!str_cmp(index_action, "on") || !str_cmp(index_action, "off")) {
             // The spec's rollback story is "one setting, not a redeploy". Turning the index back ON
             // is safe at any time only because it is maintained on every write regardless of this
