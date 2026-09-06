@@ -386,6 +386,15 @@ bool for_each_account_record_on_disk(const std::string& root_directory,
     return true;
 }
 
+std::string account_index_quarantine_key(const AccountRecordOnDisk& record)
+{
+    if (record.directory_layout)
+        return record.directory_entry_name;
+    if (record.parsed)
+        return normalize_email(record.account.normalized_email);
+    return record.record_path;
+}
+
 std::string account_character_directory(const std::string& root_directory, const std::string& account_name, const std::string&)
 {
     const std::string account_storage_key = resolve_account_storage_key(root_directory, account_name);

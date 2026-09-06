@@ -681,4 +681,36 @@ TEST_F(AccountIndexTest, RebuildReportIsEmptyWhenTheIndexAgrees)
     EXPECT_TRUE(account_index::rebuild_report(on_disk).empty());
 }
 
+TEST_F(AccountIndexTest, RebuildReportTreatsAQuarantinedRecordStillOnDiskAsAgreement)
+{
+    // A record the index could not read is still, correctly, right there on disk under the same
+    // key -- that is the index and disk agreeing about a file that cannot be parsed, not drift.
+    account_index::quarantine("corrupt@example.com",
+        "accounts/A-E/corrupt@example.com/account.json", "unparseable JSON");
+
+    std::vector<account_index::Entry> on_disk;
+    account_index::Entry corrupt_entry;
+    corrupt_entry.normalized_email = "corrupt@example.com";
+    corrupt_entry.record_path = "accounts/A-E/corrupt@example.com/account.json";
+    // normalized_account_name deliberately left empty: an unparsed record on disk discloses no
+    // account name, exactly like the live enumerator's view of it.
+    on_disk.push_back(corrupt_entry);
+
+    EXPECT_TRUE(account_index::rebuild_report(on_disk).empty());
+}
+
+TEST_F(AccountIndexTest, RebuildReportStillFlagsAQuarantinedRecordThatVanishedFromDisk)
+{
+    account_index::quarantine("corrupt@example.com",
+        "accounts/A-E/corrupt@example.com/account.json", "unparseable JSON");
+
+    // Nothing on disk corresponds to it any more (e.g. someone deleted the bad file by hand without
+    // rebooting) -- the index still thinks it owns this key, and that IS drift.
+    const std::vector<account_index::Entry> on_disk;
+
+    const std::vector<std::string> disagreements = account_index::rebuild_report(on_disk);
+    ASSERT_EQ(disagreements.size(), 1u);
+    EXPECT_NE(disagreements[0].find("corrupt@example.com"), std::string::npos);
+}
+
 } // namespace

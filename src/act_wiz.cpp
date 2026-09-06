@@ -3178,6 +3178,14 @@ ACMD(do_account)
         char index_action[MAX_INPUT_LENGTH];
         half_chop(buf, index_action, value);
 
+        // A diagnostic command's job is telling the truth about state -- silently treating an
+        // unrecognized word as the no-argument form would misreport a typo as "everything's fine".
+        if (*index_action && str_cmp(index_action, "on") && str_cmp(index_action, "off")
+            && str_cmp(index_action, "verify")) {
+            send_to_char("Usage: account index [verify|on|off]\n\r", ch);
+            return;
+        }
+
         sprintf(buf1, "Account index: %lu record(s) indexed, %lu quarantined.\n\r",
             static_cast<unsigned long>(account_index::size()),
             static_cast<unsigned long>(account_index::quarantined_count()));
@@ -3213,8 +3221,16 @@ ACMD(do_account)
                 [&records_on_disk](const account::AccountRecordOnDisk& record) {
                     account_index::Entry entry;
                     entry.record_path = record.record_path;
-                    entry.normalized_email = account::normalize_email(record.account.normalized_email);
-                    entry.normalized_account_name = account::normalize_account_name(record.account.account_name);
+                    if (record.parsed) {
+                        entry.normalized_email = account::normalize_email(record.account.normalized_email);
+                        entry.normalized_account_name = account::normalize_account_name(record.account.account_name);
+                    } else {
+                        // Must match the key account_index::quarantine() actually indexed this record
+                        // under (db.cpp's boot walker uses the same shared rule) -- deriving this any
+                        // other way is exactly how "verify" previously reported false drift for every
+                        // quarantined record.
+                        entry.normalized_email = account::account_index_quarantine_key(record);
+                    }
                     records_on_disk.push_back(entry);
                 },
                 &enum_error);

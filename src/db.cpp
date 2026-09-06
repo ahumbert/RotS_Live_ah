@@ -634,22 +634,6 @@ void populate_player_index_entry_from_store(const char_file_u& stored_character,
 
 namespace {
 
-    // Quarantine key for a record that could not be indexed. Directory-layout records (parsed or
-    // not) are keyed by their entry name, which is the email itself. A legacy flat record that
-    // parsed is keyed by the email it actually contains. A legacy flat record that did NOT parse has
-    // revealed no email at all -- its entry name is "<name>.json", not an address -- so it is keyed
-    // by its own record path instead, per the addendum: an unparseable flat record must not reserve
-    // an email it never disclosed. record.directory_layout comes straight from stat() in the
-    // enumerator, not guessed from the entry name.
-    std::string account_index_quarantine_key(const account::AccountRecordOnDisk& record)
-    {
-        if (record.directory_layout)
-            return record.directory_entry_name;
-        if (record.parsed)
-            return account::normalize_email(record.account.normalized_email);
-        return record.record_path;
-    }
-
     void visit_account_record_for_boot_index(const account::AccountRecordOnDisk& record)
     {
         if (!record.parsed) {
@@ -659,7 +643,7 @@ namespace {
             sprintf(buf, "Failed to read account-native index source '%s': %s",
                 record.record_path.c_str(), record.failure_reason.c_str());
             log(buf);
-            account_index::quarantine(account_index_quarantine_key(record),
+            account_index::quarantine(account::account_index_quarantine_key(record),
                 record.record_path, record.failure_reason);
             return;
         }

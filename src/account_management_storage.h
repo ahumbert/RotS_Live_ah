@@ -54,6 +54,19 @@ bool for_each_account_record_on_disk(const std::string& root_directory,
     const std::function<void(const AccountRecordOnDisk&)>& visitor,
     std::string* error_message = nullptr);
 
+// The key a record is (or should be) indexed/quarantined under, derived purely from the record
+// itself. Directory-layout records (parsed or not) are keyed by their entry name, which IS the
+// email even when the file fails to parse. A legacy flat record that parsed is keyed by the email
+// it actually contains. A legacy flat record that did NOT parse has revealed no email at all -- its
+// entry name is "<name>.json", not an address -- so it is keyed by its own record path instead: an
+// unparseable flat record must not reserve an email it never disclosed. `directory_layout` comes
+// straight from stat() in the enumerator, not guessed from the entry name.
+//
+// Shared by the boot walker (db.cpp) and the `account index verify` visitor (act_wiz.cpp) so both
+// agree on what an unparsed/quarantined record is keyed by -- two independent derivations of this
+// rule is exactly how a prior bug (verify reporting false drift for quarantined records) got in.
+std::string account_index_quarantine_key(const AccountRecordOnDisk& record);
+
 std::string serialize_character_migration_to_json(const CharacterMigrationData& migration);
 bool deserialize_character_migration_from_json(const std::string& json, CharacterMigrationData* migration, std::string* error_message = nullptr);
 

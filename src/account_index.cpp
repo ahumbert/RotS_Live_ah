@@ -305,6 +305,13 @@ std::vector<std::string> rebuild_report(const std::vector<Entry>& records_on_dis
             disagreements.push_back("missing from index: " + record.normalized_email);
             continue;
         }
+        if (indexed->second.quarantined) {
+            // The index correctly has this record marked unreadable, and the record is right here
+            // on disk under the same key -- that IS the index agreeing with disk about a file it
+            // cannot parse, not drift. `account index` on its own already lists every quarantined
+            // record; verify's job is to find disagreement, and there isn't any here.
+            continue;
+        }
         if (indexed->second.record_path != record.record_path) {
             disagreements.push_back("path differs for " + record.normalized_email + ": index has "
                 + indexed->second.record_path + ", disk has " + record.record_path);
