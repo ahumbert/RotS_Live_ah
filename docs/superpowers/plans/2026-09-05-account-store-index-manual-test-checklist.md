@@ -17,13 +17,18 @@ feature.
 Two server+client smoke scripts cover the client-observable items, run against a booted server:
 
 ```
-python3 testing/smoke_account_index.py [port]              # sections 2, 3, 4, 5 (except the drill)
-python3 testing/smoke_account_index_quarantine.py [port] [quarantined-email]
+export ROTS_SMOKE_EMAIL=... ROTS_SMOKE_PASSWORD=... ROTS_SMOKE_CHARACTER=...
+python3 tools/smoke_account_index.py [port]                # sections 2, 3, 4, 5 (except the drill)
+python3 tools/smoke_account_index_quarantine.py [port] [quarantined-email]
 ```
 
-Both were run green against the merged tree (`53b9cee`) on 2026-09-06 in a throwaway worktree:
-18/18 and 7/7. They live in `testing/`, which is local-only and not tracked, so they are on this
-machine but not in the repo.
+The fixture comes from the environment, not from a default: the scripts are in the repo and the
+fixture password is not. `ROTS_SMOKE_CHARACTER` must be at `LEVEL_GRGOD` or above, since the
+`account` command is immortal-only. On this machine the values are the `clauded3bugbot` fixture;
+they are recorded in memory rather than here.
+
+Both were run green in a throwaway worktree on 2026-09-06 against the merged tree, in exactly the
+form committed: 19/19 on a healthy tree and 7/7 against a genuinely corrupted record.
 
 The scripts are a floor, not a substitute — they prove the paths still work, not that the game feels
 right. Section 1 (boot) and the quarantine drill's corrupt/reboot/restore steps stay manual, because
