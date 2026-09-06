@@ -52,7 +52,12 @@ struct Entry {
 void upsert(const account::AccountData& account, const std::string& record_path,
     bool legacy_flat_layout = false);
 
-// Records an account file we could not use, keyed by its directory name. Its email stays occupied.
+// Records an account file we could not use, keyed by whatever key the caller passes -- normally
+// account::account_index_quarantine_key()'s result. That key is NOT re-normalized here: for the two
+// email-shaped cases it already IS normalize_email()'d, and for the two path-shaped cases (an
+// unparsed or emailless legacy flat record, keyed by its own record_path) it is a case-sensitive
+// filesystem path that lowercasing would silently corrupt -- account_index_quarantine_key's own doc
+// comment enumerates exactly which shape each case is. Its email stays occupied.
 void quarantine(const std::string& normalized_email, const std::string& record_path,
     const std::string& reason);
 

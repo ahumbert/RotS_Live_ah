@@ -390,8 +390,14 @@ std::string account_index_quarantine_key(const AccountRecordOnDisk& record)
 {
     if (record.directory_layout)
         return record.directory_entry_name;
-    if (record.parsed)
-        return normalize_email(record.account.normalized_email);
+    if (record.parsed) {
+        // A parsed legacy flat record is keyed by its own email UNLESS that email is empty (the
+        // "no usable email address" case, db.cpp), in which case it has revealed nothing to key it
+        // by and falls through to record_path below, exactly like the unparsed case.
+        const std::string email = normalize_email(record.account.normalized_email);
+        if (!email.empty())
+            return email;
+    }
     return record.record_path;
 }
 

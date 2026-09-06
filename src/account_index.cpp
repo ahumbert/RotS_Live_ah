@@ -117,18 +117,26 @@ void upsert(const account::AccountData& account, const std::string& record_path,
 void quarantine(const std::string& normalized_email, const std::string& record_path,
     const std::string& reason)
 {
-    const std::string email = account::normalize_email(normalized_email);
-    if (email.empty())
+    // Deliberately NOT re-run through normalize_email: the caller's key is already final. For the
+    // two email-shaped quarantine cases it is already normalize_email()'d (normalizing an
+    // already-normalized email is a harmless no-op, so this is not a behavior change for them), but
+    // for the two path-shaped cases (an unparsed or emailless legacy flat record, keyed by its own
+    // record_path) the key is a case-sensitive filesystem path -- lowercasing it here previously
+    // silently produced a key ("accounts/k-o/...") that never matched the record's real path
+    // ("accounts/K-O/...", bucket letters are always uppercase), which made `account index verify`
+    // report false drift for that quarantine shape even after both callers agreed on the same key
+    // rule.
+    if (normalized_email.empty())
         return;
 
-    erase_owned_keys(email);
+    erase_owned_keys(normalized_email);
 
     Entry entry;
-    entry.normalized_email = email;
+    entry.normalized_email = normalized_email;
     entry.record_path = record_path;
     entry.quarantined = true;
     entry.quarantine_reason = reason;
-    g_entries[email] = entry;
+    g_entries[normalized_email] = entry;
 }
 
 bool find_path_by_email(const std::string& email, std::string* record_path,

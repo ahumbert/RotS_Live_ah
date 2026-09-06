@@ -681,10 +681,10 @@ TEST_F(AccountIndexTest, RebuildReportIsEmptyWhenTheIndexAgrees)
     EXPECT_TRUE(account_index::rebuild_report(on_disk).empty());
 }
 
-TEST_F(AccountIndexTest, RebuildReportTreatsAQuarantinedRecordStillOnDiskAsAgreement)
+TEST_F(AccountIndexTest, RebuildReportTreatsAQuarantinedCorruptJsonRecordStillOnDiskAsAgreement)
 {
-    // A record the index could not read is still, correctly, right there on disk under the same
-    // key -- that is the index and disk agreeing about a file that cannot be parsed, not drift.
+    // Shape 1: directory layout, unparsed (corrupt account.json). Quarantined under its directory
+    // entry name, which IS the email even though the file never parsed.
     account_index::quarantine("corrupt@example.com",
         "accounts/A-E/corrupt@example.com/account.json", "unparseable JSON");
 
@@ -695,6 +695,46 @@ TEST_F(AccountIndexTest, RebuildReportTreatsAQuarantinedRecordStillOnDiskAsAgree
     // normalized_account_name deliberately left empty: an unparsed record on disk discloses no
     // account name, exactly like the live enumerator's view of it.
     on_disk.push_back(corrupt_entry);
+
+    EXPECT_TRUE(account_index::rebuild_report(on_disk).empty());
+}
+
+TEST_F(AccountIndexTest, RebuildReportTreatsAQuarantinedMismatchedEmailRecordStillOnDiskAsAgreement)
+{
+    // Shape 2: directory layout, PARSED, but the email inside the file disagrees with the
+    // directory name -- quarantined under the directory name, not the (wrong) email in the file.
+    // The file parsed fine, so it discloses a real, non-empty account name -- but quarantine()
+    // never records one. Without the "quarantined is agreement" guard in rebuild_report, this
+    // on-disk entry's non-empty account name would collide with the index's empty one and produce
+    // a false "account name differs" disagreement. That makes this test actually exercise the
+    // guard rather than pass by an accidental empty-equals-empty coincidence.
+    account_index::quarantine("actual@example.com",
+        "accounts/A-E/actual@example.com/account.json", "mismatched normalized email");
+
+    std::vector<account_index::Entry> on_disk;
+    account_index::Entry mismatched_entry;
+    mismatched_entry.normalized_email = "actual@example.com";
+    mismatched_entry.record_path = "accounts/A-E/actual@example.com/account.json";
+    mismatched_entry.normalized_account_name = "wrongemailguy";
+    on_disk.push_back(mismatched_entry);
+
+    EXPECT_TRUE(account_index::rebuild_report(on_disk).empty());
+}
+
+TEST_F(AccountIndexTest, RebuildReportTreatsAQuarantinedFlatNoEmailRecordStillOnDiskAsAgreement)
+{
+    // Shape 3: legacy flat layout, PARSED, but the email inside is empty -- quarantined under its
+    // own record path since it disclosed no email to key it by. Again give it a real, non-empty
+    // account name so the test would fail without the guard (same reasoning as shape 2).
+    account_index::quarantine("accounts/K-O/legacyname.json",
+        "accounts/K-O/legacyname.json", "no usable email address");
+
+    std::vector<account_index::Entry> on_disk;
+    account_index::Entry flat_entry;
+    flat_entry.normalized_email = "accounts/K-O/legacyname.json";
+    flat_entry.record_path = "accounts/K-O/legacyname.json";
+    flat_entry.normalized_account_name = "legacyname";
+    on_disk.push_back(flat_entry);
 
     EXPECT_TRUE(account_index::rebuild_report(on_disk).empty());
 }

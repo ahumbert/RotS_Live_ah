@@ -3221,16 +3221,15 @@ ACMD(do_account)
                 [&records_on_disk](const account::AccountRecordOnDisk& record) {
                     account_index::Entry entry;
                     entry.record_path = record.record_path;
-                    if (record.parsed) {
-                        entry.normalized_email = account::normalize_email(record.account.normalized_email);
-                        entry.normalized_account_name = account::normalize_account_name(record.account.account_name);
-                    } else {
-                        // Must match the key account_index::quarantine() actually indexed this record
-                        // under (db.cpp's boot walker uses the same shared rule) -- deriving this any
-                        // other way is exactly how "verify" previously reported false drift for every
-                        // quarantined record.
-                        entry.normalized_email = account::account_index_quarantine_key(record);
-                    }
+                    // account_index_quarantine_key covers every case the boot walker keys a record
+                    // by (parsed or not, directory or legacy flat, mismatched or missing email
+                    // included) -- calling it unconditionally, with no record.parsed branch here, is
+                    // what keeps this in lockstep with whatever key account_index::quarantine() (or
+                    // upsert(), for a healthy record) actually used. Two independent derivations of
+                    // this rule is exactly how "verify" twice reported false drift for a quarantined
+                    // record that was really right there on disk.
+                    entry.normalized_email = account::account_index_quarantine_key(record);
+                    entry.normalized_account_name = account::normalize_account_name(record.account.account_name);
                     records_on_disk.push_back(entry);
                 },
                 &enum_error);

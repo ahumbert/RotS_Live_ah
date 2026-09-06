@@ -653,7 +653,7 @@ namespace {
                 sprintf(buf, "Account-native index source '%s' has mismatched normalized email '%s'.",
                     record.record_path.c_str(), record.account.normalized_email.c_str());
                 log(buf);
-                account_index::quarantine(record.directory_entry_name, record.record_path, buf);
+                account_index::quarantine(account::account_index_quarantine_key(record), record.record_path, buf);
                 return;
             }
         } else {
@@ -666,7 +666,7 @@ namespace {
                 sprintf(buf, "Legacy flat account record '%s' has no usable email address.",
                     record.record_path.c_str());
                 log(buf);
-                account_index::quarantine(record.record_path, record.record_path, buf);
+                account_index::quarantine(account::account_index_quarantine_key(record), record.record_path, buf);
                 return;
             }
         }
@@ -710,7 +710,7 @@ namespace {
                     sprintf(buf, "Failed to inspect account-native character file '%s': %s",
                         character_path.c_str(), inspect_error.c_str());
                     log(buf);
-                    account_index::quarantine(record.directory_entry_name, record.record_path, buf);
+                    account_index::quarantine(account::account_index_quarantine_key(record), record.record_path, buf);
                     return;
                 }
 
@@ -720,7 +720,7 @@ namespace {
                 sprintf(buf, "Failed to read account-native character file '%s': %s",
                     character_path.c_str(), read_error.c_str());
                 log(buf);
-                account_index::quarantine(record.directory_entry_name, record.record_path, buf);
+                account_index::quarantine(account::account_index_quarantine_key(record), record.record_path, buf);
                 return;
             }
 
