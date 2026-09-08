@@ -7,9 +7,6 @@ asserts what should be true while exactly one record is unreadable:
   1. The server is running at all. Before this work, one unparseable account.json called exit(1)
      and the game did not boot.
   2. `account index` lists the record as QUARANTINED.
-  3. `account index verify` still reports agreement -- a quarantined record present on disk is the
-     index agreeing with disk about a file it cannot read, NOT drift. This one regressed twice
-     during development, so it is asserted explicitly.
 
     ROTS_SMOKE_EMAIL=... ROTS_SMOKE_PASSWORD=... ROTS_SMOKE_CHARACTER=... \
         python3 tools/smoke_account_index_quarantine.py [port] [quarantined-email]
@@ -67,10 +64,6 @@ try:
           counts is not None and int(counts.group(2)) > 0, out[-400:])
     check('the quarantined record is listed with its path and reason',
           'QUARANTINED' in out and (QUARANTINED is None or QUARANTINED in out), out[-500:])
-
-    out = run_cmd(m, 'account index verify', r'Index agrees with disk\.|DRIFT')
-    check('`account index verify` still reports agreement (quarantine is not drift)',
-          'Index agrees with disk.' in out and 'DRIFT' not in out, out[-500:])
 
     m.clear(); m.send('quit'); m.pump(2.0)
 finally:

@@ -3180,8 +3180,8 @@ ACMD(do_account)
 
         // A diagnostic command's job is telling the truth about state -- silently treating an
         // unrecognized word as the no-argument form would misreport a typo as "everything's fine".
-        if (*index_action && str_cmp(index_action, "verify")) {
-            send_to_char("Usage: account index [verify]\n\r", ch);
+        if (*index_action) {
+            send_to_char("Usage: account index\n\r", ch);
             return;
         }
 
@@ -3216,49 +3216,6 @@ ACMD(do_account)
             snprintf(buf1, MAX_STRING_LENGTH, "  CONTESTED %s '%s' claimed by: %s\n\r",
                 contested.kind.c_str(), contested.key.c_str(), claimants.c_str());
             send_to_char(buf1, ch);
-        }
-
-        if (!str_cmp(index_action, "verify")) {
-            std::vector<account_index::Entry> records_on_disk;
-            std::string enum_error;
-            const bool walked = account::for_each_account_record_on_disk(
-                ".",
-                [&records_on_disk](const account::AccountRecordOnDisk& record) {
-                    account_index::Entry entry;
-                    entry.record_path = record.record_path;
-                    // account_index_quarantine_key covers every case the boot walker keys a record
-                    // by (parsed or not, directory or legacy flat, mismatched or missing email
-                    // included) -- calling it unconditionally, with no record.parsed branch here, is
-                    // what keeps this in lockstep with whatever key account_index::quarantine() (or
-                    // upsert(), for a healthy record) actually used. Two independent derivations of
-                    // this rule is exactly how "verify" twice reported false drift for a quarantined
-                    // record that was really right there on disk.
-                    entry.normalized_email = account::account_index_quarantine_key(record);
-                    entry.normalized_account_name = account::normalize_account_name(record.account.account_name);
-                    // The character keys this record lists, so rebuild_report can compare the keys
-                    // that actually drift. Empty for an unparsed record, which is right: nothing
-                    // was learned about its characters, and rebuild_report skips a quarantined
-                    // record's character comparison anyway.
-                    entry.character_keys = record.account.characters;
-                    records_on_disk.push_back(entry);
-                },
-                &enum_error);
-
-            if (!walked) {
-                send_to_char(("Could not read the accounts directory: " + enum_error + "\n\r").c_str(), ch);
-                return;
-            }
-
-            const std::vector<std::string> disagreements = account_index::rebuild_report(records_on_disk);
-            if (disagreements.empty()) {
-                send_to_char("Index agrees with disk.\n\r", ch);
-                return;
-            }
-
-            for (const std::string& line : disagreements) {
-                sprintf(buf1, "  DRIFT %s\n\r", line.c_str());
-                send_to_char(buf1, ch);
-            }
         }
 
         return;

@@ -147,13 +147,9 @@ try:
               'index=%s disk=%s' % (counts.group(1), on_disk))
         check('nothing is quarantined on a healthy tree', counts.group(2) == '0', out[-400:])
 
-    out = run_cmd(m, 'account index verify', r'Index agrees with disk\.|DRIFT')
-    check('`account index verify` reports agreement',
-          'Index agrees with disk.' in out and 'DRIFT' not in out, out[-500:])
-
     out = run_cmd(m, 'account index frobnicate', r'Usage: account index')
     check('an unrecognized action prints usage, not the summary',
-          'Usage: account index [verify]' in out and 'record(s) indexed' not in out,
+          'Usage: account index' in out and 'record(s) indexed' not in out,
           out[-300:])
 
     m.clear(); m.send('quit'); m.pump(2.5)

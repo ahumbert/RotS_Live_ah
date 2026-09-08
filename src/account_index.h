@@ -31,12 +31,6 @@ struct Entry {
     // True when this entry came from the legacy flat layout (accounts/<bucket>/<name>.json) rather
     // than the directory layout. Used only to enforce upsert's directory-over-flat precedence.
     bool legacy_flat_layout = false;
-    // The character names this record lists. Populated ONLY for the on-disk view handed to
-    // rebuild_report; entries read back out of the live index leave it empty, because the index
-    // does not hang characters off an Entry -- character ownership lives in its own key map so that
-    // one character can be reported as contested between two records. It is a list of keys, not a
-    // slice of AccountData: nothing here is the record's contents.
-    std::vector<std::string> character_keys;
 };
 
 // Re-derives every key this record owns from the record itself, dropping any key it owned before.
@@ -176,14 +170,6 @@ bool is_enabled();
 // Empty means the index and the disk agree. Takes the disk view as an argument rather than reading
 // it, so this is testable without a filesystem and so the caller owns the (readdir) enumeration.
 //
-// The CHARACTER keys are compared too, from each record's `character_keys`. They were the blind
-// spot: this used to look only at email -> (record path, account name), which are the keys that
-// barely move, while the character keys are exactly what the boot auto-deletion sweep mutates and
-// exactly the keys whose staleness sends a save into the wrong account's directory. A stale
-// character key still printed "Index agrees with disk." Contested keys are compared as claimant
-// SETS rather than reported as drift: a genuinely duplicated character on disk is the index
-// agreeing with disk, and `account index` lists those separately.
-std::vector<std::string> rebuild_report(const std::vector<Entry>& records_on_disk);
 
 } // namespace account_index
 

@@ -84,7 +84,6 @@ game said "saved".
 ## 5. Immortal surface (`LEVEL_GRGOD`)
 
 - [ ] `account index` — reports the count and lists nothing quarantined on a healthy tree.
-- [ ] `account index verify` — reports `Index agrees with disk.`
 - [ ] `account index frobnicate` — prints usage rather than silently showing the summary.
 
 ### Quarantine drill — on a COPY of the account tree, never live
@@ -93,8 +92,6 @@ game said "saved".
 - [ ] The server **boots** rather than exiting, and logs `1 record(s) quarantined` plus a per-record
       line naming the file and why.
 - [ ] `account index` lists that record.
-- [ ] `account index verify` still reports agreement — a quarantined record present on disk is not
-      drift.
 - [ ] Creating an account at a **different** address still works. (A quarantined record must not
       block creation game-wide.)
 - [ ] Creating an account at the **quarantined** address is refused. (Its address is reserved — this
