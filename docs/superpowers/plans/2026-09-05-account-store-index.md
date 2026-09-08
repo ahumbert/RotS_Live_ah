@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++17, 32-bit (`-m32`), GTest via `src/CMakeLists.txt`, no new dependencies.
 
-**Spec:** `docs/superpowers/specs/2026-09-05-account-store-index-design.md` (findings it builds on: `docs/superpowers/specs/2026-09-05-account-storage-findings.md`)
+**Spec:** `docs/superpowers/specs/2026-09-05-account-store-index-design.md`
 
 ## Global Constraints
 

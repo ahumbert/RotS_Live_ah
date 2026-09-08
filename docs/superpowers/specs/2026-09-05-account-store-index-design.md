@@ -3,7 +3,6 @@
 Date: 2026-09-05
 Status: **Design, approved in discussion. No implementation plan yet.**
 Branch: `feat/account-store`, based on `upstream/release-frodo` (e045806).
-Findings this builds on: `2026-09-05-account-storage-findings.md` (same directory).
 
 ## What this changes
 
