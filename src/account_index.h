@@ -76,7 +76,12 @@ bool note_unreadable_at_runtime(const std::string& record_key, const std::string
 std::vector<Entry> unreadable_at_runtime_entries();
 std::size_t unreadable_at_runtime_count();
 
-// Records an account file we could not use, keyed by whatever key the caller passes -- normally
+// Records an account file we could not use. NOTHING ON DISK IS TOUCHED: despite the name this moves,
+// copies, renames and writes no file. It drops the record's keys from the lookup maps, clears any
+// contention it was part of, and stores the reason -- so the index refuses to resolve it while its
+// address stays reserved against a fresh account being created over a real player's record. The
+// state lives only as long as the process; the next boot walk decides again from the files as they
+// are. Keyed by whatever key the caller passes -- normally
 // account::account_index_quarantine_key()'s result. That key is NOT re-normalized here: for the two
 // email-shaped cases it already IS normalize_email()'d, and for the two path-shaped cases (an
 // unparsed or emailless legacy flat record, keyed by its own record_path) it is a case-sensitive

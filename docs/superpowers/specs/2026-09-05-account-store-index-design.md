@@ -108,12 +108,17 @@ something, and stopping before players log in and write on top of it is the reco
 
 Two properties this must keep:
 
-- **A quarantined record stays on disk, untouched, with its email still occupied in the index,
-  marked bad.** Otherwise the address reads as "no account exists" and the next person to enter it
+- **Quarantine is an in-memory mark, not a filing operation.** Nothing is moved, copied, renamed or
+  written; the record stays on disk exactly as it is, with its email still occupied in the index,
+  marked bad. The state lasts only for the life of the process — the next boot decides again from
+  the files as they stand. Otherwise the address reads as "no account exists" and the next person to enter it
   could create a fresh account over a real player's record — turning a recoverable parse error into
   actual data loss.
 - **Quarantine is loud.** A `mudlog` at boot plus a wizard-visible list of what was quarantined, so
-  it is triaged rather than left to rot.
+  it is triaged rather than left to rot. The same applies after boot: a record that becomes
+  unreadable while the server runs is logged, mudlogged once, and listed — but only *marked*, never
+  quarantined, since withdrawing a live player's keys over a transient read error would cost them
+  every save until the next reboot.
 
 ### 5. Write path and drift
 
@@ -150,8 +155,8 @@ on. Because the resolvers keep their signatures, these must pass
 fix.
 
 **New coverage** — index build, key maintenance across link/rename/delete, quarantine and the
-threshold, an email staying reserved while quarantined, and rebuild-and-compare detecting a
-deliberately corrupted index.
+threshold, an email staying reserved while quarantined, and a record that goes unreadable after boot
+being marked and reported without withdrawing any key.
 
 **One constraint shapes how those are written:** per the note in `account_cache.h`, the on-disk
 `readdir` scan does not resolve under QEMU i386 emulation, which is why the cache carries

@@ -88,6 +88,10 @@ game said "saved".
 
 ### Quarantine drill — on a COPY of the account tree, never live
 
+**"Quarantine" is in-memory only.** Nothing is moved, copied, renamed or written. The file stays
+exactly where it is; the index simply refuses to resolve it and reserves its address. The state
+lasts only for the life of the process — reboot and the boot walk decides again from scratch.
+
 - [ ] Corrupt one `account.json` (e.g. `echo 'not json' > …`), boot.
 - [ ] The server **boots** rather than exiting, and logs `1 record(s) quarantined` plus a per-record
       line naming the file and why.
@@ -96,15 +100,28 @@ game said "saved".
       block creation game-wide.)
 - [ ] Creating an account at the **quarantined** address is refused. (Its address is reserved — this
       is what stops a new account being written over a real player's record.)
-- [ ] `account index off` is **refused** while anything is quarantined. This is deliberate: with the
-      index off, one quarantined record makes every account-native character save write nothing.
-- [ ] Restore the record; confirm byte-identical; reboot; `verify` clean again.
+- [ ] Confirm the corrupt file is still in place, unmoved and unmodified — quarantine touches no
+      file.
+- [ ] Restore the record; confirm byte-identical; reboot; `account index` reports nothing
+      quarantined.
+
+### Unreadable-since-boot drill — on a COPY, never live
+
+- [ ] Boot with a healthy tree, then corrupt one `account.json` **while the server is running**.
+- [ ] Log in as that account's owner. The login path writes the record, which now refuses.
+- [ ] The syslog gets one line naming the file and the parser's reason, and online immortals see it
+      mudlogged. Log in again: it is **not** repeated — the report is once per record.
+- [ ] `account index` lists it under `UNREADABLE SINCE BOOT`, separately from quarantined records.
+- [ ] That account's characters still resolve and still save. This is report-only; it withdraws
+      nothing.
+- [ ] Restore the file and log in again. The next successful write clears the mark, with no reboot.
 
 ## 6. If something is wrong in production
 
-1. `account index off` — falls every resolver back to the pre-change directory scans. It refuses
-   while records are quarantined; if it refuses, move the quarantined files aside first.
-2. If that is not enough, run the previous binary. No data migration is needed in either direction.
+`account index` names every record the server could not read, with its path and the reason. Since
+nothing on disk changed and quarantine moves no file, the record is where it has always been and can
+be inspected or repaired in place. A repaired record needs a reboot to leave quarantine; one merely
+marked unreadable-since-boot clears on the next successful write.
 
 ---
 
