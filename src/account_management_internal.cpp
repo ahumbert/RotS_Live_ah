@@ -204,7 +204,7 @@ namespace {
     {
         CharacterMigrationData persisted_snapshot = snapshot_data;
         // The authoritative migrated player state lives in character.json. Keep
-        // raw legacy player bytes in-memory for the current rollback path, but
+        // raw legacy player bytes in-memory for the in-flight conversion, but
         // do not persist them into the transitional migration artifact.
         persisted_snapshot.player_file = LegacyAssetSnapshot {};
 

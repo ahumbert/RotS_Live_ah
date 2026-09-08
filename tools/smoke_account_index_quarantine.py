@@ -10,9 +10,6 @@ asserts what should be true while exactly one record is unreadable:
   3. `account index verify` still reports agreement -- a quarantined record present on disk is the
      index agreeing with disk about a file it cannot read, NOT drift. This one regressed twice
      during development, so it is asserted explicitly.
-  4. `account index off` is REFUSED. With the index off the directory scan hard-fails on the
-     unreadable record and save_char then writes nothing for every account-native character,
-     silently. The refusal is the feature.
 
     ROTS_SMOKE_EMAIL=... ROTS_SMOKE_PASSWORD=... ROTS_SMOKE_CHARACTER=... \
         python3 tools/smoke_account_index_quarantine.py [port] [quarantined-email]
@@ -74,12 +71,6 @@ try:
     out = run_cmd(m, 'account index verify', r'Index agrees with disk\.|DRIFT')
     check('`account index verify` still reports agreement (quarantine is not drift)',
           'Index agrees with disk.' in out and 'DRIFT' not in out, out[-500:])
-
-    out = run_cmd(m, 'account index off', r'Refusing:|lookups are now OFF')
-    check('`account index off` is REFUSED while a record is quarantined',
-          'Refusing:' in out and 'lookups are now OFF' not in out, out[-600:])
-    check('the refusal explains the consequence rather than just saying no',
-          'NO account-native character can save' in out, out[-600:])
 
     m.clear(); m.send('quit'); m.pump(2.0)
 finally:

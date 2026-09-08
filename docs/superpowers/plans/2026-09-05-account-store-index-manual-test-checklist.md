@@ -4,7 +4,7 @@ For the merge of `feat/account-store` into `release-frodo` (merge commit `03f84a
 Design: `docs/superpowers/specs/2026-09-05-account-store-index-design.md`.
 
 **What changed, in one line:** account lookups no longer walk `accounts/` — an in-memory index
-answers them. Nothing on disk changed, so **rollback is running the old binary**.
+answers them. Nothing on disk changed: same JSON, same filenames, same paths, same write order.
 
 **What did NOT change, and is worth knowing before you start:** the JSON, the filenames, the paths,
 and the order writes happen in. If you see a difference in any of those, that is a bug, not the
@@ -86,9 +86,6 @@ game said "saved".
 - [ ] `account index` — reports the count and lists nothing quarantined on a healthy tree.
 - [ ] `account index verify` — reports `Index agrees with disk.`
 - [ ] `account index frobnicate` — prints usage rather than silently showing the summary.
-- [ ] `account index off`, then log in again — still works (this is the directory-scan fallback, and
-      it is the rollback path).
-- [ ] `account index on` — still works.
 
 ### Quarantine drill — on a COPY of the account tree, never live
 

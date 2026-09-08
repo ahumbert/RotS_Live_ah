@@ -15,9 +15,9 @@ namespace account_index {
 
 // Boot refuses to continue past this many unusable account records. The threshold is a bug
 // detector, not a corruption tolerance: the write path cannot produce a torn file, so the realistic
-// causes of an unreadable record are ours (a serialization change, a normalize_email change, a
-// rollback to a binary that rejects a newer field) and they hit many records at once. One is a
-// genuine one-off and must not take the game down; six means we shipped something.
+// causes of an unreadable record are ours (a serialization change, a normalize_email change) and
+// they hit many records at once. One is a genuine one-off and must not take the game down; six
+// means we shipped something.
 static constexpr std::size_t MAX_QUARANTINED_RECORDS_AT_BOOT = 5;
 
 // One indexed record. A quarantined entry still occupies its email so that a record we could not

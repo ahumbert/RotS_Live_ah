@@ -914,9 +914,9 @@ namespace {
             return false;
         }
 
-        // Index fast path. The scan below stays as the rollback path for one release; it runs
-        // whenever the index is disabled (the test binary, and any build that turns it off) or when
-        // the caller is working against a tree other than the one the index was built for.
+        // Index fast path. The scan below is what runs when the index is not authoritative for
+        // this root: the test binary, which never calls boot_db, and any caller working against a
+        // tree other than the one the index was built for.
         // account_index::find_path_by_account_name reproduces this function's not-found text
         // verbatim, and the path it returns may end in "<name>.json" for a legacy flat record --
         // exactly as the scan's own directory-over-flat precedence would return it.

@@ -10,7 +10,7 @@ Findings this builds on: `2026-09-05-account-storage-findings.md` (same director
 The account subsystem resolves accounts by walking the `accounts/` directory and parsing every
 record it finds. This replaces those walks with an in-memory index, built at boot and maintained on
 write. Nothing about the on-disk format changes: same JSON, same filenames, same paths, written at
-the same moment in the same order. Rolling back is running the old binary.
+the same moment in the same order.
 
 ## Scope
 
@@ -102,8 +102,8 @@ The threshold is a bug detector, not a corruption tolerance. The write path cann
 file — `write_account_file` checks the `fwrite` length and the `fclose`, removes the temp on either
 failure, and only then renames — so disk-full or a crash mid-write leaves the previous record
 intact. The realistic causes of an unreadable record are ours and they hit many records at once: a
-serialization change, a `normalize_email` change (which is what the mismatch check actually
-detects), or a rollback to a binary that rejects a field a newer one wrote. One bad record is a
+serialization change, or a `normalize_email` change (which is what the mismatch check actually
+detects). One bad record is a
 genuine one-off and should not take the game down for everyone. Six at once means we shipped
 something, and stopping before players log in and write on top of it is the recoverable outcome.
 

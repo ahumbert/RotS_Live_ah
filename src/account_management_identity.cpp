@@ -553,7 +553,8 @@ bool create_account_for_email(const std::string& root_directory, const std::stri
     // if anything unreadable is sitting at the destination path. That second one also covers the
     // residual case the index cannot see, a record that becomes unreadable AFTER boot.
     //
-    // The disabled path keeps the full scan: that is the rollback behaviour, unchanged.
+    // When the index is not authoritative for this root (the test binary, or a caller working
+    // against another tree) the full scan still runs, unchanged.
     if (!account_index_is_authoritative_for(root_directory)) {
         std::string storage_error;
         if (account_storage_contains_unreadable_records(root_directory, &storage_error)) {
@@ -954,8 +955,8 @@ bool find_linked_character_owner_account_uncached(const std::string& root_direct
     if (!validate_identifier_for_path(character_name, "Character name", error_message))
         return false;
 
-    // Index fast path. The scan below (find_character_owner_account) stays as the rollback path and
-    // is what runs whenever the index is disabled, or when the caller's root_directory is not the
+    // Index fast path. The scan below (find_character_owner_account) is what runs when the index is
+    // not authoritative for this root: the test binary, or a caller whose root_directory is not the
     // tree the index was built against (its stored paths would belong to the wrong tree).
     //
     // The return convention here is the whole risk of this function and is taken verbatim from the
@@ -1001,8 +1002,8 @@ bool find_linked_character_owner_account_uncached(const std::string& root_direct
         // authoritative while enabled, maintained at the single write chokepoint, and nothing in the
         // codebase deletes an account record (character deletion rewrites the record, it does not
         // remove one; see the no-erase-API note in account_index.h). A record that would not parse is
-        // quarantined at boot and refused above rather than resolved. The disabled path below still
-        // reads, so the rollback behaviour is unchanged.
+        // quarantined at boot and refused above rather than resolved. The scan below still reads
+        // for the roots the index does not speak for.
         *owner_account_name = indexed_owner_account_name;
         set_error(error_message, "");
         return true;

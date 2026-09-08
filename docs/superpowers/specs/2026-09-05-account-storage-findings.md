@@ -101,7 +101,7 @@ already being paid — it keeps the result instead of discarding it.
 ### Options considered
 
 - **A. In-memory index, JSON files remain the truth — RECOMMENDED.** Derived state only, so it
-  cannot drift from the records. No new dependency. Files stay human-inspectable and rollback-safe.
+  cannot drift from the records. No new dependency. Files stay human-inspectable.
   Matches how the rest of the MUD works.
 - **B. Persisted index file.** Skips the boot pass, but introduces an index that can disagree with
   the records after a crash — trading a cost already paid for a class of consistency bugs.

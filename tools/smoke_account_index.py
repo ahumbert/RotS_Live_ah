@@ -23,11 +23,6 @@ Why these particular assertions, so a later reader does not weaken them by accid
   is the path where a wrong owner lookup is silently destructive: save_char picks the directory
   from the owner answer and CREATES a file there if absent, so a wrong answer migrates a
   character's saves into an account that does not own it while the game still says it saved.
-- `account index off` is exercised with a SECOND connection logging in while it is off. That is the
-  point of the switch: it drops every resolver back to the pre-change directory scans. Asserting
-  only that the command echoed "OFF" would pass even if the fallback were broken.
-- The toggle is restored to ON in a finally block. Leaving a shared dev server with the index off
-  would silently change what every later test measures.
 """
 import os, re, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -158,32 +153,8 @@ try:
 
     out = run_cmd(m, 'account index frobnicate', r'Usage: account index')
     check('an unrecognized action prints usage, not the summary',
-          'Usage: account index [verify|on|off]' in out and 'record(s) indexed' not in out,
+          'Usage: account index [verify]' in out and 'record(s) indexed' not in out,
           out[-300:])
-
-    # --- 5. The rollback switch, proven by a real login while it is off --------------------------
-    try:
-        out = run_cmd(m, 'account index off', r'lookups are now OFF|Refusing:')
-        check('`account index off` takes effect', 'Account index lookups are now OFF.' in out,
-              out[-400:])
-
-        second = connect()
-        try:
-            ok, tail = login(second)
-            check('a login still works with the index OFF (the scan fallback)', ok, tail[-300:])
-        finally:
-            second.close()
-    finally:
-        out = run_cmd(m, 'account index on', r'lookups are now ON')
-        check('`account index on` restores the index', 'Account index lookups are now ON.' in out,
-              out[-300:])
-
-    third = connect()
-    try:
-        ok, tail = login(third)
-        check('a login works again with the index back ON', ok, tail[-300:])
-    finally:
-        third.close()
 
     m.clear(); m.send('quit'); m.pump(2.5)
 finally:

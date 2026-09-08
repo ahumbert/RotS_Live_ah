@@ -1320,7 +1320,7 @@ TEST_F(AccountIndexTest, TheRecordEnumeratorSkipsNonRegularJsonEntries)
 TEST_F(AccountIndexTest, ADanglingSymlinkInABucketDoesNotRefuseAccountCreation)
 {
     // The same regression from the other side, with no index involved at all: this is the pure
-    // scan path (index disabled), which is the rollback behaviour and has to be correct on its own.
+    // scan path (index disabled), which still has to be correct on its own.
     IndexTemporaryDirectory root_directory;
     ASSERT_FALSE(root_directory.path().empty());
     const std::string root = root_directory.path();
@@ -1421,7 +1421,7 @@ TEST_F(AccountIndexTest, TheOwnerFastPathAnswersWithoutReadingTheRecordFile)
         << "the fast path must name the same account the scan named";
 
     // And the scan really cannot answer any more, which is what makes the assertion above mean
-    // something: it did not accidentally fall through to the rollback path.
+    // something: it did not accidentally fall through to the scan.
     std::string gone_owner;
     {
         ScopedIndexEnabled disabled(false);
@@ -1573,7 +1573,7 @@ TEST_F(AccountIndexTest, AnAppleDoubleDotfileIsLitterToBothWalkers)
     EXPECT_EQ(visited, 1u) << "a dotfile is litter, so it must not be quarantined either";
 
     // The half the old test never touched. Index DISABLED on purpose: this is the creation guard's
-    // own walk, the rollback path, and it has to be right on its own. Reverted, this fails with
+    // own walk, and it has to be right on its own. Reverted, this fails with
     // "Existing account records could not be read safely." -- for every registration, forever.
     ASSERT_FALSE(account_index::is_enabled());
     account::AccountData newcomer;
@@ -1668,7 +1668,7 @@ TEST_F(AccountIndexTest, AFlatCandidateWeCannotStatIsVisitedRatherThanSkipped)
     // them through the shared reader, calls each one a record it cannot read.
     EXPECT_EQ(unreadable.size(), 2u);
 
-    // And with the index off (the rollback path) the guard must still refuse over them, because an
+    // And with the index off the guard must still refuse over them, because an
     // entry we cannot stat is a record we cannot read, not litter.
     ASSERT_FALSE(account_index::is_enabled());
     account::AccountData newcomer;
@@ -1845,15 +1845,15 @@ TEST_F(AccountIndexTest, CreationDoesNotWalkTheAccountTreeWhenTheIndexIsAuthorit
             << "the scan still ran: " << creation_error;
     }
 
-    // The rollback path must keep the full scan, unchanged: with the index off the same tree still
+    // The scan path must stay correct on its own: with the index off the same tree still
     // refuses. This is what makes the assertion above mean "the walk did not happen" rather than
     // "the walk stopped noticing".
     ASSERT_FALSE(account_index::is_enabled());
-    account::AccountData rolled_back;
-    std::string rollback_error;
+    account::AccountData scanned_newcomer;
+    std::string scan_error;
     EXPECT_FALSE(account::create_account_for_email(root, "slow@example.com", "ValidPass1", 1700000002,
-        &rolled_back, &rollback_error));
-    EXPECT_EQ(rollback_error, "Existing account records could not be read safely.");
+        &scanned_newcomer, &scan_error));
+    EXPECT_EQ(scan_error, "Existing account records could not be read safely.");
 
     account_index::set_root_directory(".");
 }

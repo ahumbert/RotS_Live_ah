@@ -579,7 +579,7 @@ In `src/account_index.h`, inside `namespace account_index`, above `struct Entry`
 // Boot refuses to continue past this many unusable account records. The threshold is a bug
 // detector, not a corruption tolerance: the write path cannot produce a torn file, so the realistic
 // causes of an unreadable record are ours (a serialization change, a normalize_email change, a
-// rollback to a binary that rejects a newer field) and they hit many records at once. One is a
+// normalize_email change) and they hit many records at once. One is a
 // genuine one-off and must not take the game down; six means we shipped something.
 static constexpr std::size_t MAX_QUARANTINED_RECORDS_AT_BOOT = 5;
 ```
@@ -746,7 +746,7 @@ In `src/db.cpp`, beside line 312:
 
 Confirm this runs *before* `build_player_index()` (db.cpp:971). If it does not, move the `account_index::set_enabled(true)` call so that it does.
 
-This is the default-on half of the rollout. The runtime off switch arrives in Task 7 as `account index off`; until then, a rollback means reverting the commits. Do not go to the live port between Task 5 and Task 7 for that reason.
+This is the default-on half of the rollout. There is no runtime off switch and no going back to the scan-based system; the index is how accounts resolve from here on.
 
 - [ ] **Step 5: Compile**
 
@@ -946,7 +946,7 @@ git commit -m "feat(account): maintain the index at the account write chokepoint
 - Consumes: `account_index::find_path_by_email`, `find_path_by_account_name`, `find_owner_email_by_character`, `is_enabled` (Task 1); a populated index (Tasks 3 and 4).
 - Produces: no new symbols. This is the task that makes the scans stop running.
 
-**This is the payoff and the risk.** Each function gets an index fast path guarded by `account_index::is_enabled()`, falling through to the existing scan when the index is off. Do not delete the scans — they are the rollback path for one release.
+**This is the payoff and the risk.** Each function gets an index fast path guarded by `account_index::is_enabled()`, falling through to the existing scan when the index is not authoritative for the caller's root. Do not delete the scans — the test binary never calls `boot_db`, and callers working against another tree still need them. They are not a way back to the old system.
 
 **Error strings are load-bearing.** Before editing each function, read the exact text it sets on failure and make the index path produce the same string. Several existing tests assert on this text.
 
@@ -1229,6 +1229,11 @@ git commit -m "fix(account): refuse to create an account over a quarantined reco
 ---
 
 ### Task 7: Wizard visibility — list quarantined records and verify the index
+
+> **Superseded 2026-09-08:** the `account index on|off` toggle described in this task was removed.
+> It existed to switch the resolvers back to the directory scan, which is not something this project
+> will ever do. Only `account index` and `account index verify` ship. The code below is kept as the
+> record of how the task was built, not as a description of what the command does now.
 
 **Files:**
 - Modify: `src/account_index.h`, `src/account_index.cpp` (add `rebuild_report`)
