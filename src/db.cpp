@@ -634,6 +634,12 @@ void populate_player_index_entry_from_store(const char_file_u& stored_character,
 
 namespace {
 
+    // Characters the boot walk could not read. Each one already logs its own line, but a line per
+    // character buried in the syslog is not a report: a character missing from player_table cannot
+    // be selected, and the player is simply told it does not exist. The count is mudlogged beside
+    // the quarantine count so it is seen rather than found later.
+    std::size_t g_unreadable_character_files_at_boot = 0;
+
     void visit_account_record_for_boot_index(const account::AccountRecordOnDisk& record)
     {
         if (!record.parsed) {
@@ -723,6 +729,7 @@ namespace {
                     sprintf(buf, "Failed to inspect account-native character file '%s': %s (account '%s' stays usable; this character is not in the player index)",
                         character_path.c_str(), inspect_error.c_str(), record.record_path.c_str());
                     log(buf);
+                    ++g_unreadable_character_files_at_boot;
                     continue;
                 }
 
@@ -732,6 +739,7 @@ namespace {
                 sprintf(buf, "Failed to read account-native character file '%s': %s (account '%s' stays usable; this character is not in the player index)",
                     character_path.c_str(), read_error.c_str(), record.record_path.c_str());
                 log(buf);
+                ++g_unreadable_character_files_at_boot;
                 continue;
             }
 
@@ -751,6 +759,18 @@ void build_account_native_player_index(void)
     if (quarantined > 0) {
         sprintf(buf, "Account index: %lu record(s) quarantined; use the account index wizard command to list them.",
             static_cast<unsigned long>(quarantined));
+        log(buf);
+        mudlog(buf, BRF, LEVEL_IMMORT, TRUE);
+    }
+
+    if (g_unreadable_character_files_at_boot > 0) {
+        // Not fatal and deliberately not counted against MAX_QUARANTINED_RECORDS_AT_BOOT: a bad
+        // character file is not the account's failure, and refusing the boot over one would lock
+        // its owner out of every other character they own. But it must not be silent -- each of
+        // these is a character that cannot be selected, and the player is told only that it does
+        // not exist.
+        sprintf(buf, "Account index: %lu account-native character file(s) could not be read and are NOT in the player index; see the per-character lines above.",
+            static_cast<unsigned long>(g_unreadable_character_files_at_boot));
         log(buf);
         mudlog(buf, BRF, LEVEL_IMMORT, TRUE);
     }

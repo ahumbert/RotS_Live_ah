@@ -3634,6 +3634,15 @@ void nanny(struct descriptor_data* d, char* arg)
             std::string error_message;
 
             if (!account::link_and_migrate_character(kAccountStorageRoot, d->account_name, arg, GET_NAME(d->character), time(0), &account_data, &migration, &error_message)) {
+                // The success case below has always mudlogged. The failure case told the player and
+                // nobody else -- no log, no mudlog -- so a conversion that cannot complete was
+                // invisible unless the player thought to report it. That is the wrong way round:
+                // this is the one-way door onto the account system, and a character that will not
+                // convert is stuck outside it. It is not hypothetical either -- a legacy character
+                // whose description exceeds 511 bytes fails load_char outright, and there are
+                // hundreds of those on live.
+                vmudlog(BRF, "FAILED to link character %s to account %s: %s",
+                    GET_NAME(d->character), d->account_name, error_message.c_str());
                 SEND_TO_Q((error_message + "\n\r").c_str(), d);
                 clear_account_login_state(d);
                 STATE(d) = CON_PLYNG;
