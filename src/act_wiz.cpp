@@ -3185,10 +3185,21 @@ ACMD(do_account)
             return;
         }
 
-        sprintf(buf1, "Account index: %lu record(s) indexed, %lu quarantined.\n\r",
+        sprintf(buf1, "Account index: %lu record(s) indexed, %lu quarantined, %lu unreadable since boot.\n\r",
             static_cast<unsigned long>(account_index::size()),
-            static_cast<unsigned long>(account_index::quarantined_count()));
+            static_cast<unsigned long>(account_index::quarantined_count()),
+            static_cast<unsigned long>(account_index::unreadable_at_runtime_count()));
         send_to_char(buf1, ch);
+
+        // Listed separately from quarantined records because they mean different things: a
+        // quarantined record was refused at boot and resolves for nobody, while one of these still
+        // resolves and still saves -- the server simply could not read its file at some point after
+        // boot. Without this listing that failure appears nowhere in the game at all.
+        for (const account_index::Entry& entry : account_index::unreadable_at_runtime_entries()) {
+            sprintf(buf1, "  UNREADABLE SINCE BOOT %s (%s): %s\n\r", entry.normalized_email.c_str(),
+                entry.record_path.c_str(), entry.unreadable_at_runtime_reason.c_str());
+            send_to_char(buf1, ch);
+        }
 
         for (const account_index::Entry& entry : account_index::quarantined_entries()) {
             sprintf(buf1, "  QUARANTINED %s (%s): %s\n\r", entry.normalized_email.c_str(),

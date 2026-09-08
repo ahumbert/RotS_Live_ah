@@ -444,6 +444,50 @@ std::size_t quarantined_count()
     return count;
 }
 
+bool note_unreadable_at_runtime(const std::string& record_key, const std::string& reason)
+{
+    // No normalization here, for the same reason quarantine() does none: callers key a record by
+    // account_index_quarantine_key()'s result, which is already normalized for the email-shaped
+    // cases and is a case-sensitive path for the others.
+    const auto entry = g_entries.find(record_key);
+    if (entry == g_entries.end())
+        return false;
+
+    // Already known bad. A quarantined record was refused at boot and is listed as such; saying it
+    // again under a second heading would double-count it in the wizard output.
+    if (entry->second.quarantined)
+        return false;
+
+    // Idempotent: the write chokepoint runs on every successful login, so a record that stays
+    // broken reaches this line repeatedly. Only the first arrival is news.
+    if (entry->second.unreadable_at_runtime)
+        return false;
+
+    entry->second.unreadable_at_runtime = true;
+    entry->second.unreadable_at_runtime_reason = reason;
+    return true;
+}
+
+std::vector<Entry> unreadable_at_runtime_entries()
+{
+    std::vector<Entry> unreadable;
+    for (const auto& entry : g_entries) {
+        if (entry.second.unreadable_at_runtime && !entry.second.quarantined)
+            unreadable.push_back(entry.second);
+    }
+    return unreadable;
+}
+
+std::size_t unreadable_at_runtime_count()
+{
+    std::size_t count = 0;
+    for (const auto& entry : g_entries) {
+        if (entry.second.unreadable_at_runtime && !entry.second.quarantined)
+            ++count;
+    }
+    return count;
+}
+
 std::size_t size()
 {
     return g_entries.size();

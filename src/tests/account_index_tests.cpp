@@ -1659,3 +1659,145 @@ TEST_F(AccountIndexTest, CreationStillRefusesAnAddressWhoseRecordBootCouldNotRea
 }
 
 } // namespace
+
+// --- Post-boot unreadable marking ---------------------------------------------------------------
+//
+// Boot reports every record it cannot read. Nothing walks the tree again afterwards, so a record
+// that goes bad LATER used to be reported nowhere: write_account_file refused it, and its only
+// live caller (clear_account_login_failures, on every successful login) passes a null error message
+// and ignores the return. These pin the fix, and pin that it stays report-only.
+
+TEST_F(AccountIndexTest, NotingARecordUnreadableAtRuntimeChangesNoLookup)
+{
+    const account::AccountData account = make_account("player@example.com", "player", { "Frodo" });
+    account_index::upsert(account, "accounts/P-T/player@example.com/account.json");
+
+    ASSERT_TRUE(account_index::note_unreadable_at_runtime("player@example.com", "boom"));
+
+    // The whole point: this marks and reports, it does not withdraw. A player whose record hiccups
+    // must keep resolving, or save_char writes nothing for them until the next reboot.
+    std::string path;
+    EXPECT_TRUE(account_index::find_path_by_email("player@example.com", &path, nullptr));
+    EXPECT_EQ(path, "accounts/P-T/player@example.com/account.json");
+    EXPECT_TRUE(account_index::find_path_by_account_name("player", &path, nullptr));
+    std::string owner_email;
+    EXPECT_TRUE(account_index::find_owner_email_by_character("Frodo", &owner_email, nullptr));
+    EXPECT_EQ(owner_email, "player@example.com");
+
+    EXPECT_FALSE(account_index::is_quarantined("player@example.com"));
+    EXPECT_EQ(account_index::quarantined_count(), 0u);
+}
+
+TEST_F(AccountIndexTest, ARecordUnreadableAtRuntimeIsListedWithItsReason)
+{
+    const account::AccountData account = make_account("player@example.com", "player", {});
+    account_index::upsert(account, "accounts/P-T/player@example.com/account.json");
+    ASSERT_TRUE(account_index::note_unreadable_at_runtime("player@example.com", "Expected string value."));
+
+    const std::vector<account_index::Entry> listed = account_index::unreadable_at_runtime_entries();
+    ASSERT_EQ(listed.size(), 1u);
+    EXPECT_EQ(listed[0].normalized_email, "player@example.com");
+    EXPECT_EQ(listed[0].record_path, "accounts/P-T/player@example.com/account.json");
+    EXPECT_EQ(listed[0].unreadable_at_runtime_reason, "Expected string value.");
+    EXPECT_EQ(account_index::unreadable_at_runtime_count(), 1u);
+}
+
+TEST_F(AccountIndexTest, MarkingTheSameRecordTwiceReportsNewsOnlyOnce)
+{
+    const account::AccountData account = make_account("player@example.com", "player", {});
+    account_index::upsert(account, "accounts/P-T/player@example.com/account.json");
+
+    // write_account_file runs on EVERY successful login, so a record that stays broken reaches the
+    // call site again and again. Only the first arrival may log, or one bad file fills the syslog.
+    EXPECT_TRUE(account_index::note_unreadable_at_runtime("player@example.com", "first"));
+    EXPECT_FALSE(account_index::note_unreadable_at_runtime("player@example.com", "second"));
+    EXPECT_EQ(account_index::unreadable_at_runtime_count(), 1u);
+    EXPECT_EQ(account_index::unreadable_at_runtime_entries()[0].unreadable_at_runtime_reason, "first");
+}
+
+TEST_F(AccountIndexTest, AnUnknownRecordKeyIsNotInventedAsAnEntry)
+{
+    // An entry carries a record path that find_path_by_email would hand out, so a key with no entry
+    // must not gain one here.
+    EXPECT_FALSE(account_index::note_unreadable_at_runtime("nobody@example.com", "boom"));
+    EXPECT_EQ(account_index::unreadable_at_runtime_count(), 0u);
+    EXPECT_FALSE(account_index::find_path_by_email("nobody@example.com", nullptr, nullptr));
+}
+
+TEST_F(AccountIndexTest, AQuarantinedRecordIsNotAlsoReportedAsUnreadableAtRuntime)
+{
+    account_index::quarantine("player@example.com", "accounts/P-T/player@example.com/account.json", "corrupt");
+
+    // It was already refused at boot and is already listed under its own heading; counting it twice
+    // would misreport one bad file as two.
+    EXPECT_FALSE(account_index::note_unreadable_at_runtime("player@example.com", "boom"));
+    EXPECT_EQ(account_index::unreadable_at_runtime_count(), 0u);
+    EXPECT_EQ(account_index::quarantined_count(), 1u);
+}
+
+TEST_F(AccountIndexTest, ARepairedRecordClearsTheRuntimeMarkWithoutAReboot)
+{
+    const account::AccountData account = make_account("player@example.com", "player", { "Frodo" });
+    account_index::upsert(account, "accounts/P-T/player@example.com/account.json");
+    ASSERT_TRUE(account_index::note_unreadable_at_runtime("player@example.com", "boom"));
+    ASSERT_EQ(account_index::unreadable_at_runtime_count(), 1u);
+
+    // A successful write re-upserts the entry. There is no un-quarantine, but this mark must not
+    // need one: once the file reads again the report has to stop, or it lies until the next boot.
+    account_index::upsert(account, "accounts/P-T/player@example.com/account.json");
+    EXPECT_EQ(account_index::unreadable_at_runtime_count(), 0u);
+    EXPECT_TRUE(account_index::unreadable_at_runtime_entries().empty());
+}
+
+TEST_F(AccountIndexTest, ARecordThatGoesBadAfterBootIsMarkedWhenTheWriteChokepointHitsIt)
+{
+    // The integration half of the fix, and the actual gap: boot reports what it cannot read, then
+    // nothing walks the tree again. write_account_file runs on every successful login and refuses
+    // over a record it cannot parse, but its caller (clear_account_login_failures) passes a null
+    // error message and ignores the return -- so the failure reached no log, no mudlog and no
+    // wizard command. Reverted, this test fails at the unreadable_at_runtime_count assertion.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    std::string error_message;
+    account::AccountData resident;
+    ASSERT_TRUE(account::create_account_for_email(root, "resident@example.com", "ValidPass1",
+        1700000000, &resident, &error_message))
+        << error_message;
+
+    build_index_like_boot(root);
+    ASSERT_EQ(account_index::quarantined_count(), 0u);
+    ASSERT_EQ(account_index::unreadable_at_runtime_count(), 0u);
+
+    // Healthy at boot, corrupt afterwards -- the case quarantine cannot see.
+    const std::string record_path = root + "/accounts/"
+        + account::account_bucket_for_name("resident@example.com") + "/resident@example.com/account.json";
+    {
+        FILE* file = std::fopen(record_path.c_str(), "w");
+        ASSERT_NE(file, nullptr) << record_path;
+        std::fputs("{ not json any more", file);
+        std::fclose(file);
+    }
+
+    {
+        ScopedIndexEnabled enabled(true);
+        std::string write_error;
+        EXPECT_FALSE(account::write_account_file(root, resident, &write_error));
+        EXPECT_EQ(write_error, "Existing account file could not be read safely.");
+
+        ASSERT_EQ(account_index::unreadable_at_runtime_count(), 1u);
+        const std::vector<account_index::Entry> listed = account_index::unreadable_at_runtime_entries();
+        ASSERT_EQ(listed.size(), 1u);
+        EXPECT_EQ(listed[0].normalized_email, "resident@example.com");
+        EXPECT_FALSE(listed[0].unreadable_at_runtime_reason.empty())
+            << "a report with no reason is the one piece of evidence, missing";
+
+        // Report-only: the account still resolves, so the owner keeps saving.
+        EXPECT_FALSE(account_index::is_quarantined("resident@example.com"));
+        std::string path;
+        EXPECT_TRUE(account_index::find_path_by_email("resident@example.com", &path, nullptr));
+    }
+
+    account_index::set_root_directory(".");
+}

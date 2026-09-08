@@ -214,7 +214,31 @@ bool write_account_file(const std::string& root_directory, const AccountData& ac
     // filesystem, so moving the checks up changes no on-disk ordering on the success path.
     if (path_exists(final_path)) {
         AccountData existing_account_at_target;
-        if (!read_account_file_from_path(final_path, &existing_account_at_target, nullptr)) {
+        std::string existing_read_error;
+        if (!read_account_file_from_path(final_path, &existing_account_at_target, &existing_read_error)) {
+            // The post-boot half of the quarantine story. Boot walks every record and reports what
+            // it cannot read; nothing walks the tree again afterwards, so a record that goes bad
+            // later was reported NOWHERE -- this function runs on every successful login
+            // (clear_account_login_failures), whose caller passes a null error_message and ignores
+            // the return, so the failure was completely silent. We already have the file open and
+            // already know it will not parse, so marking it here costs no walk and no extra I/O.
+            //
+            // Marked, not quarantined: quarantine withdraws the record's account-name and character
+            // claims with no way back short of a reboot, so a transient EIO would cost a live player
+            // every save until the next boot. This changes no lookup's answer -- see
+            // note_unreadable_at_runtime. A later successful write re-upserts the entry and clears
+            // the mark, so a repaired record heals without a reboot.
+            if (account_index_is_authoritative_for(root_directory)
+                && account_index::note_unreadable_at_runtime(normalized_email,
+                    existing_read_error.empty() ? "Account record could not be read." : existing_read_error)) {
+                char log_buffer[MAX_STRING_LENGTH];
+                std::snprintf(log_buffer, sizeof(log_buffer),
+                    "Account record '%s' could not be read after boot: %s (the account is still indexed; `account index` lists it)",
+                    final_path.c_str(),
+                    existing_read_error.empty() ? "Account record could not be read." : existing_read_error.c_str());
+                log(log_buffer);
+                mudlog(log_buffer, BRF, LEVEL_IMMORT, TRUE);
+            }
             set_error(error_message, "Existing account file could not be read safely.");
             return false;
         }

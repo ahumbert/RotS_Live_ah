@@ -28,6 +28,11 @@ struct Entry {
     std::string normalized_account_name;
     bool quarantined = false;
     std::string quarantine_reason;
+    // Set when a record that indexed cleanly at boot later failed to read. Report-only: unlike
+    // quarantine this withdraws NOTHING, so a player whose record hiccups keeps resolving and
+    // keeps saving. See note_unreadable_at_runtime.
+    bool unreadable_at_runtime = false;
+    std::string unreadable_at_runtime_reason;
     // True when this entry came from the legacy flat layout (accounts/<bucket>/<name>.json) rather
     // than the directory layout. Used only to enforce upsert's directory-over-flat precedence.
     bool legacy_flat_layout = false;
@@ -51,6 +56,25 @@ struct Entry {
 // to offer account creation. The create-account branch would silently stop working.
 void upsert(const account::AccountData& account, const std::string& record_path,
     bool legacy_flat_layout = false);
+
+// Marks a record the server failed to read AFTER boot, so it shows up in `account index` instead of
+// failing silently. Returns true only the FIRST time a given record is marked, which is how the
+// caller knows to log: the write chokepoint runs on every successful login, so logging
+// unconditionally would repeat the same line forever for one bad file.
+//
+// Deliberately NOT quarantine(). Quarantine withdraws the record's account-name and character
+// claims, and there is no way back short of a reboot -- so a transient EIO or a moment of EACCES
+// would drop a live player's character key, and save_char would then write NOTHING for them,
+// silently, until the next boot. That is the very loss this subsystem exists to prevent. This marks
+// and reports; it changes no lookup's answer.
+//
+// Only marks a record the index already holds. A key with no entry is not invented here: an entry
+// carries a record path that find_path_by_email would then hand out.
+bool note_unreadable_at_runtime(const std::string& record_key, const std::string& reason);
+
+// Every record marked by note_unreadable_at_runtime, for the wizard listing.
+std::vector<Entry> unreadable_at_runtime_entries();
+std::size_t unreadable_at_runtime_count();
 
 // Records an account file we could not use, keyed by whatever key the caller passes -- normally
 // account::account_index_quarantine_key()'s result. That key is NOT re-normalized here: for the two
