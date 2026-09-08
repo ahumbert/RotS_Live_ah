@@ -3655,7 +3655,7 @@ bool sortable_reader(const std::string& root_directory, const std::string&, cons
     char_file_u* stored_character, std::string* error_message)
 {
     EXPECT_EQ(root_directory, ".") << "reader invoked with an unexpected root directory -- selection and "
-                                      "rendering must resolve roster_cache entries against the same root";
+                                       "rendering must resolve roster_cache entries against the same root";
     *stored_character = char_file_u {};
     if (character_name == "gimli") {
         stored_character->level = 30;
@@ -3866,7 +3866,7 @@ TEST_F(RosterOrderTest, SideSortOrdersAlphabeticallyWithinEachSide)
             EXPECT_EQ(root_directory, ".");
             *stored_character = char_file_u {};
             if (character_name == "orczz" || character_name == "orcaa")
-                stored_character->race = RACE_ORC; // dark
+                stored_character->race = RACE_ORC;   // dark
             else
                 stored_character->race = RACE_HUMAN; // light
             if (error_message)

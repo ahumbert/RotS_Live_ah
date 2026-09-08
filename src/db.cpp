@@ -2313,7 +2313,7 @@ int load_player_from_text(char* name, const char* player_text, struct char_file_
         /* clear line, then read off a line */
         memset(line, 0, 99);
         for (tmpchar = position, tmp1 = 0; tmpchar < input_end && (*tmpchar != '\n') && (*tmpchar != '\r') && (*tmpchar != '\0');
-             tmpchar++, tmp1++) {
+            tmpchar++, tmp1++) {
             if (tmp1 >= static_cast<int>(sizeof(line) - 1)) {
                 sprintf(buf, "load_player_from_text: malformed player data for %s (line too long)", name);
                 log(buf);
@@ -2835,7 +2835,7 @@ int create_entry(char* name)
     (player_table + top_of_p_table)->rank = PKILL_UNRANKED;
     (player_table + top_of_p_table)->totalrank = PKILL_UNRANKED;
     for (i = 0; (*(player_table[top_of_p_table].name + i) = LOWER(*(name + i)));
-         i++)
+        i++)
         ;
     return (top_of_p_table);
 }
@@ -3378,7 +3378,7 @@ char* fread_string(FILE* fl, char* error)
             strcat(buf, tmppoint);
 
         for (point = buf + strlen(buf) - 2; point >= buf && isspace(*point);
-             point--)
+            point--)
             continue;
         if ((flag = (*point == '~')))
             *point = 0;
@@ -3940,7 +3940,7 @@ void record_crime(char_data* criminal, char_data* victim, int crime,
     if (IS_NPC(victim) || (GET_LEVEL(victim) >= LEVEL_IMMORT) || (IS_NPC(criminal)))
         return;
     for (tmpchar = world[victim->in_room].people; tmpchar;
-         tmpchar = tmpchar->next_in_room) {
+        tmpchar = tmpchar->next_in_room) {
         if ((tmpchar == criminal) || (IS_NPC(tmpchar)) || (GET_LEVEL(tmpchar) >= LEVEL_IMMORT))
             continue;
         add_crime(criminal->specials2.idnum, victim->specials2.idnum,
