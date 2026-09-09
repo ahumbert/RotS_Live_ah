@@ -76,8 +76,8 @@ bool for_each_account_record_on_disk(const std::string& root_directory,
     std::string* error_message = nullptr);
 
 // The key a record is (or should be) indexed/quarantined under, derived purely from the record
-// itself, covering every shape the boot walker (db.cpp) and `account index verify` (act_wiz.cpp)
-// use it for:
+// itself, covering every shape the boot walker (db.cpp) and the account-creation guard
+// (account_management.cpp) use it for:
 //   - directory layout, parsed or not -> its entry name, which IS the email even when the file
 //     fails to parse (and even when the email INSIDE a parsed file disagrees with it -- the
 //     directory name is the one the record is actually filed under).
@@ -86,8 +86,8 @@ bool for_each_account_record_on_disk(const std::string& root_directory,
 //     has revealed no email to key it by (either it never parsed, or it parsed to an empty one),
 //     and an unparseable/emailless flat record must not reserve an email it never disclosed.
 // Both callers must go through this one function with no local branching of their own -- two
-// independent derivations of this rule is what produced a false-drift bug in `account index verify`
-// twice. `directory_layout` comes straight from stat() in the enumerator, not guessed from the
+// independent derivations of this rule is what twice put the index and the disk into disagreement
+// over a record that was really right there. `directory_layout` comes straight from stat() in the enumerator, not guessed from the
 // entry name.
 std::string account_index_quarantine_key(const AccountRecordOnDisk& record);
 

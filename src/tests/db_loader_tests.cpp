@@ -38,6 +38,7 @@ void clear_char(struct char_data* ch, int mode);
 void save_player(struct char_data* ch, int load_room, int index_pos);
 void store_to_char(struct char_file_u* st, struct char_data* ch);
 int Crash_alias_load(struct char_data* ch, FILE* fp);
+int rename_char(struct char_data* ch, char* newname);
 
 namespace {
 
@@ -1956,3 +1957,169 @@ TEST(DbLoader, DoesNotTrustTheIndexWhenAnAccountBucketCannotBeRead)
         << "a bucket the server cannot read leaves the index incomplete, so it must not be authoritative";
 }
 
+TEST(DbLoader, IndexesADirectoryAccountWhoseDirectoryNameIsNotNormalized)
+{
+    // account_index_quarantine_key normalizes the directory name before keying by it, and says why:
+    // the server writes it normalized, but a hand-made or restored directory need not be. The boot
+    // walk's mismatch check normalized only the record's own email, so a restored
+    // "accounts/A-E/Bob@Example.com/" disagreed with its own account.json and was quarantined --
+    // locking the player out and reserving their address against re-registration.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+
+    ASSERT_EQ(mkdir("accounts", 0700), 0);
+    ASSERT_EQ(mkdir("accounts/A-E", 0700), 0);
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(".", "alpha-admin", "bob@example.com", "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
+    ASSERT_EQ(rename("accounts/A-E/bob@example.com", "accounts/A-E/Bob@Example.com"), 0);
+
+    account_index::clear();
+    account_index::set_root_directory(".");
+    account_index::set_enabled(true);
+
+    build_account_native_player_index();
+
+    std::string record_path;
+    const bool found = account_index::find_path_by_email("bob@example.com", &record_path, nullptr);
+    const std::size_t quarantined = account_index::quarantined_count();
+    account_index::set_enabled(false);
+    account_index::clear();
+
+    EXPECT_EQ(quarantined, 0u) << "a directory name that is merely unnormalized is not a mismatched record";
+    EXPECT_TRUE(found) << "the account must stay reachable by its own email address";
+}
+
+TEST(DbLoader, DoesNotTrustTheIndexWhenAnAccountBucketCannotBeStatted)
+{
+    // The opendir failure below this check synthesizes an unreadable-bucket record precisely so the
+    // index refuses to speak for a tree it could not read. The stat above it just skipped the
+    // bucket -- no record, no log, no counter -- and the walk still reported success. An accounts/
+    // directory with read but not search permission fails EVERY bucket stat that way: the index
+    // comes up empty and authoritative, and every player is told no account exists for them.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+
+    ASSERT_EQ(mkdir("accounts", 0700), 0);
+    ASSERT_EQ(mkdir("accounts/A-E", 0700), 0);
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(".", "alpha-admin", "bob@example.com", "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
+
+    // Readable (opendir and readdir still work), but not searchable (stat on any child fails).
+    ASSERT_EQ(chmod("accounts", 0400), 0);
+
+    account_index::clear();
+    account_index::set_root_directory(".");
+    account_index::set_enabled(true);
+
+    build_account_native_player_index();
+
+    const bool still_enabled = account_index::is_enabled();
+    chmod("accounts", 0700);
+    account_index::set_enabled(false);
+    account_index::clear();
+
+    EXPECT_FALSE(still_enabled)
+        << "a bucket the server cannot stat hides an unknown number of accounts, so the index must not be authoritative";
+}
+
+TEST(DbLoader, RecordsTheNamechangeExploitForAnAccountNativeCharacter)
+{
+    // The namechange achievement is the only record that a character used to be somebody else, and
+    // write_exploits refuses to write for a character its account no longer lists. Writing the
+    // record after the account rename therefore dropped it silently: account.json had already been
+    // rewritten to the new name while GET_NAME(ch) was still the old one.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+    ScopedPlayerTableEntry player_table_entry("aragorn");
+    ensure_test_world_room(3001);
+
+    ASSERT_EQ(mkdir("accounts", 0700), 0);
+    ASSERT_EQ(mkdir("accounts/A-E", 0700), 0);
+    ASSERT_EQ(mkdir("players", 0700), 0);
+    ASSERT_EQ(mkdir("players/A-E", 0700), 0);
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(".", "alpha-admin", "player@example.com", "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_link_character(".", "alpha-admin", "aragorn", 1700010102, nullptr, &error_message)) << error_message;
+
+    char_file_u stored_character = make_stored_character("aragorn");
+    ASSERT_TRUE(account::write_account_character_file(".", "alpha-admin", stored_character, &error_message)) << error_message;
+    std::snprintf(player_table[0].ch_file, sizeof(player_table[0].ch_file), "%s",
+        account::account_character_player_path(".", "alpha-admin", "aragorn").c_str());
+
+    char_data character {};
+    clear_char(&character, MOB_VOID);
+    store_to_char(&stored_character, &character);
+
+    descriptor_data descriptor {};
+    std::snprintf(descriptor.pwd, sizeof(descriptor.pwd), "%s", "LegacyPw1");
+    std::snprintf(descriptor.host, sizeof(descriptor.host), "%s", "test-host");
+    std::snprintf(descriptor.account_name, sizeof(descriptor.account_name), "%s", "alpha-admin");
+    character.desc = &descriptor;
+
+    char new_name[] = "Bartholomew";
+    ASSERT_EQ(rename_char(&character, new_name), 1);
+
+    std::vector<exploit_record> records;
+    ASSERT_TRUE(load_exploit_records_for_character(".", "bartholomew", &records, &error_message)) << error_message;
+    ASSERT_EQ(records.size(), 1u) << "the renamed character must carry the record of what it used to be called";
+    EXPECT_EQ(records[0].type, EXPLOIT_ACHIEVEMENT);
+    EXPECT_NE(std::string(records[0].chVictimName).find("aragorn->"), std::string::npos)
+        << "recorded as: " << records[0].chVictimName;
+}
+
+TEST(DbLoader, RefusesARenameWhoseAccountNativePathWouldNotFitThePlayerIndex)
+{
+    // Every other writer of player_table[].ch_file goes through update_player_index_entry_from_store,
+    // which REFUSES an over-length path rather than truncating it. The rename wrote the new path
+    // with a raw snprintf: in memory the entry silently lost its ".character.json" suffix, and on
+    // the next boot populate_player_index_entry_from_store rebuilt the same over-length path, hit
+    // the guard, and exit(1)'d -- one rename could stop the server from booting at all.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+    ScopedPlayerTableEntry player_table_entry("aragorn");
+    ensure_test_world_room(3001);
+
+    ASSERT_EQ(mkdir("accounts", 0700), 0);
+    ASSERT_EQ(mkdir("accounts/F-J", 0700), 0);
+    ASSERT_EQ(mkdir("players", 0700), 0);
+    ASSERT_EQ(mkdir("players/A-E", 0700), 0);
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(".", "long-account", "firstname.lastname@somecompanyname.com", "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_link_character(".", "long-account", "aragorn", 1700010102, nullptr, &error_message)) << error_message;
+
+    char_file_u stored_character = make_stored_character("aragorn");
+    ASSERT_TRUE(account::write_account_character_file(".", "long-account", stored_character, &error_message)) << error_message;
+
+    const std::string old_character_path = account::account_character_player_path(".", "long-account", "aragorn");
+    std::snprintf(player_table[0].ch_file, sizeof(player_table[0].ch_file), "%s", old_character_path.c_str());
+
+    const std::string would_be_path = account::account_character_player_path(".", "long-account", "bartholomew");
+    ASSERT_GE(would_be_path.size(), sizeof(player_table[0].ch_file))
+        << "this fixture only means anything if the new path really does not fit: " << would_be_path;
+
+    char_data character {};
+    clear_char(&character, MOB_VOID);
+    store_to_char(&stored_character, &character);
+
+    descriptor_data descriptor {};
+    std::snprintf(descriptor.pwd, sizeof(descriptor.pwd), "%s", "LegacyPw1");
+    std::snprintf(descriptor.host, sizeof(descriptor.host), "%s", "test-host");
+    std::snprintf(descriptor.account_name, sizeof(descriptor.account_name), "%s", "long-account");
+    character.desc = &descriptor;
+
+    char new_name[] = "Bartholomew";
+    EXPECT_EQ(rename_char(&character, new_name), -1) << "a rename that cannot be indexed must be abandoned, not half-done";
+
+    struct stat file_info { };
+    EXPECT_EQ(stat(old_character_path.c_str(), &file_info), 0) << "the character must still be where it was";
+    EXPECT_STREQ(player_table[0].ch_file, old_character_path.c_str()) << "the player index must still point at it";
+    EXPECT_EQ(stat(would_be_path.c_str(), &file_info), -1) << "nothing may have been written to the path that does not fit";
+
+    account::AccountData account_data;
+    ASSERT_TRUE(account::read_account_file(".", "long-account", &account_data, &error_message)) << error_message;
+    EXPECT_TRUE(account::account_has_character(account_data, "aragorn")) << "the account must still claim the character by its old name";
+}

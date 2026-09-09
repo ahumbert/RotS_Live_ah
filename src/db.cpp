@@ -659,7 +659,12 @@ namespace {
         }
 
         if (record.directory_layout) {
-            if (account::normalize_email(record.account.normalized_email) != record.directory_entry_name) {
+            // Both sides normalized, for the reason account_index_quarantine_key states when it
+            // normalizes this same directory name: the server writes it normalized, but a hand-made
+            // or restored directory need not be. Comparing a normalized email against a raw
+            // directory name quarantines such a record -- locking the player out and reserving the
+            // address against re-registration -- over a difference that is only in case.
+            if (account::normalize_email(record.account.normalized_email) != account::normalize_email(record.directory_entry_name)) {
                 sprintf(buf, "Account-native index source '%s' has mismatched normalized email '%s'.",
                     record.record_path.c_str(), record.account.normalized_email.c_str());
                 log(buf);
@@ -4858,58 +4863,92 @@ int delete_exploits_file(char* name)
     return (1);
 }
 
-// Renames a character whose files live in account storage. The legacy path below deletes the
-// character's file and lets the next save recreate it under the new name; for an account-native
-// character that delete destroys the only copy, and account.json goes on naming a file that is no
-// longer there -- the roster then shows the row as "[ ?? ???]" and it can never be played again.
+// A rename of a character whose files live in account storage, resolved but not yet carried out.
+// The legacy path below deletes the character's file and lets the next save recreate it under the
+// new name; for an account-native character that delete destroys the only copy, and account.json
+// goes on naming a file that is no longer there -- the roster then shows the row as "[ ?? ???]" and
+// it can never be played again.
 //
-// Returns false only when the rename should be ABANDONED. A character that is not account-native
-// is not this function's business and reports success with did_rename left false.
-static bool rename_account_native_character(struct char_data* ch, int player_i, const char* newname, bool* did_rename)
+// Deciding and doing are separate steps because one thing has to happen BETWEEN them: the namechange
+// exploit record. write_exploits refuses to write for a character its own account no longer lists,
+// and committing the rename rewrites account.json to the new name while GET_NAME(ch) is still the
+// old one -- so a record written after the commit is silently dropped.
+struct account_native_rename {
+    bool applies = false;
+    std::string owner_account_name;
+    std::string old_name;
+    std::string new_character_path;
+};
+
+// Returns false only when the rename should be ABANDONED. A character that is not account-native is
+// not this function's business and reports success with plan->applies left false. Nothing on disk
+// has moved when this returns, either way.
+static bool plan_account_native_rename(struct char_data* ch, int player_i, const char* newname, account_native_rename* plan)
 {
-    *did_rename = false;
+    *plan = account_native_rename();
     if (!has_suffix(player_table[player_i].ch_file, ".character.json"))
         return true;
 
-    const std::string old_name = GET_NAME(ch);
+    plan->old_name = GET_NAME(ch);
     if (!account::is_valid_account_name(newname)) {
         sprintf(buf, "rename_char: refusing to rename account-native character %s to %s: the account layer rejects that name",
-            old_name.c_str(), newname);
+            plan->old_name.c_str(), newname);
         log(buf);
         return false;
     }
 
-    std::string owner_account_name;
     std::string account_error;
-    if (!account::find_linked_character_owner_account(".", old_name, &owner_account_name, &account_error)) {
+    if (!account::find_linked_character_owner_account(".", plan->old_name, &plan->owner_account_name, &account_error)) {
         sprintf(buf, "rename_char: refusing to rename %s: linked ownership could not be resolved: %s",
-            old_name.c_str(), account_error.c_str());
+            plan->old_name.c_str(), account_error.c_str());
         log(buf);
         return false;
     }
 
-    if (owner_account_name.empty()) {
+    if (plan->owner_account_name.empty()) {
         sprintf(buf, "rename_char: refusing to rename %s: stored in account storage but no account claims it",
-            old_name.c_str());
+            plan->old_name.c_str());
         log(buf);
         return false;
     }
 
+    plan->new_character_path = account::account_character_player_path(".", plan->owner_account_name,
+        account::normalize_account_name(newname));
+
+    // Checked here, before any file moves, because every other writer of ch_file goes through
+    // update_player_index_entry_from_store, which REFUSES an over-length path rather than truncating
+    // it. Truncating instead would drop the ".character.json" suffix the live save path tests for,
+    // and populate_player_index_entry_from_store rebuilds this same path at boot and exit(1)s when
+    // it does not fit -- one rename would be enough to stop the server booting at all.
+    if (plan->new_character_path.size() >= sizeof(player_table[player_i].ch_file)) {
+        sprintf(buf, "rename_char: refusing to rename %s to %s: the account-native path is %zu bytes; player index limit is %zu",
+            plan->old_name.c_str(), newname, plan->new_character_path.size(),
+            sizeof(player_table[player_i].ch_file) - 1);
+        log(buf);
+        return false;
+    }
+
+    plan->applies = true;
+    return true;
+}
+
+// Moves the character, object and exploits files, rewrites account.json, and repoints the player
+// index at the new path. Returns false when the rename could not be carried out.
+static bool commit_account_native_rename(int player_i, const char* newname, const account_native_rename& plan)
+{
     std::string rename_error;
-    if (!account::admin_rename_linked_character(".", owner_account_name, old_name, newname,
+    if (!account::admin_rename_linked_character(".", plan.owner_account_name, plan.old_name, newname,
             time(0), nullptr, &rename_error)) {
         sprintf(buf, "rename_char: could not rename %s to %s in account %s: %s",
-            old_name.c_str(), newname, owner_account_name.c_str(), rename_error.c_str());
+            plan.old_name.c_str(), newname, plan.owner_account_name.c_str(), rename_error.c_str());
         log(buf);
         return false;
     }
 
-    // The player index must follow the files, or the next save resolves the old path.
-    std::string normalized_new_name = account::normalize_account_name(newname);
-    const std::string new_character_path = account::account_character_player_path(".", owner_account_name, normalized_new_name);
-    std::snprintf(player_table[player_i].ch_file, sizeof(player_table[player_i].ch_file), "%s", new_character_path.c_str());
-
-    *did_rename = true;
+    // The player index must follow the files, or the next save resolves the old path. Planning
+    // already refused a path that would not fit, so this cannot truncate.
+    std::snprintf(player_table[player_i].ch_file, sizeof(player_table[player_i].ch_file), "%s",
+        plan.new_character_path.c_str());
     return true;
 }
 
@@ -4923,15 +4962,26 @@ int rename_char(struct char_data* ch, char* newname)
 
     // Account-native characters are renamed through the account layer, which moves the three files
     // and rewrites account.json together. A refusal here aborts the rename entirely rather than
-    // falling through to the legacy path, whose rm would destroy the character.
-    bool renamed_in_account_storage = false;
-    if (!rename_account_native_character(ch, player_i, newname, &renamed_in_account_storage))
+    // falling through to the legacy path, whose rm would destroy the character. Nothing has moved
+    // yet -- only the decision has been made.
+    account_native_rename account_rename;
+    if (!plan_account_native_rename(ch, player_i, newname, &account_rename))
         return -1;
 
     /* note this in exploits, i hate the ! on NOTE, so we use ACHIEVEMENT */
+    // Written while the account still lists the OLD name, because write_exploits refuses to write
+    // for a character its account does not claim -- and the commit below rewrites account.json to
+    // the new name while GET_NAME(ch) is still the old one. The commit then moves the exploits file
+    // along with the character, so the record follows it to the new name. A commit that fails after
+    // this point leaves the record behind under the old name, which is the honest outcome: the
+    // namechange was attempted, and both the attempt and the failure are logged.
     sprintf(namebuf, "Name: %s->%s", GET_NAME(ch), newname);
     vmudlog(BRF, "%s namechanged: now known as %s.", GET_NAME(ch), newname);
     add_exploit_record(EXPLOIT_ACHIEVEMENT, ch, 0, namebuf);
+
+    const bool renamed_in_account_storage = account_rename.applies;
+    if (renamed_in_account_storage && !commit_account_native_rename(player_i, newname, account_rename))
+        return -1;
 
     if (!renamed_in_account_storage) {
         /* remove their char file */

@@ -375,7 +375,14 @@ bool for_each_account_record_on_disk(const std::string& root_directory,
         return false;
     }
 
-    while (dirent* bucket_entry = readdir(accounts_dir)) {
+    int accounts_read_errno = 0;
+    for (;;) {
+        errno = 0;
+        dirent* bucket_entry = readdir(accounts_dir);
+        if (bucket_entry == nullptr) {
+            accounts_read_errno = errno;
+            break;
+        }
         // Skip "." / ".." and any other hidden entry (e.g. a stray .DS_Store or editor swap file) --
         // classify_bucket_entry applies the same rule to the entries inside a bucket, so both
         // walkers agree that the whole dotfile class is litter.
@@ -383,31 +390,57 @@ bool for_each_account_record_on_disk(const std::string& root_directory,
             continue;
 
         const std::string bucket_path = accounts_directory + "/" + bucket_entry->d_name;
-        struct stat bucket_info { };
-        if (stat(bucket_path.c_str(), &bucket_info) != 0 || !S_ISDIR(bucket_info.st_mode))
-            continue;
 
-        DIR* bucket_dir = opendir(bucket_path.c_str());
-        if (bucket_dir == nullptr) {
-            // A bucket that will not open is EVERY account in it leaving the index at once, and
-            // account_storage_contains_unreadable_records hard-fails on the same condition. Skipping
-            // it silently here left a state where the guard refused every registration on the server
-            // while nothing was quarantined, nothing was logged and `account index verify` reported
-            // agreement. Visit it as one unreadable record instead: that is what makes it visible in
-            // `account index`, counted at boot, and armed as the guard's escape hatch. Keyed by the
-            // bucket's own path -- see account_index_key_for_unreadable_bucket.
+        // A bucket the walk cannot read is EVERY account in it leaving the index at once, and
+        // account_storage_contains_unreadable_records hard-fails on the same condition. Skipping one
+        // silently left a state where the guard refused every registration on the server while
+        // nothing was quarantined and nothing was logged. Visit it as one unreadable record instead:
+        // that is what makes it visible in `account index`, counted at boot, and armed as the
+        // guard's escape hatch. Keyed by the bucket's own path -- see
+        // account_index_key_for_unreadable_bucket. Every way of failing to read a bucket goes
+        // through here, because the index's authority does not depend on WHICH call failed.
+        const auto visit_unreadable_bucket = [&](const std::string& failure_reason) {
             AccountRecordOnDisk record;
             record.directory_entry_name = bucket_entry->d_name;
             record.record_path = bucket_path;
             record.directory_layout = false;
             record.parsed = false;
             record.unreadable_bucket = true;
-            record.failure_reason = "Failed to open account bucket directory '" + bucket_path + "': " + std::strerror(errno);
+            record.failure_reason = failure_reason;
             visitor(record);
+        };
+
+        struct stat bucket_info { };
+        if (stat(bucket_path.c_str(), &bucket_info) != 0) {
+            // ENOENT is the entry disappearing between readdir and stat: nothing to read, and
+            // nothing hidden either. Anything else hides a bucket exactly the way a failing opendir
+            // does -- an accounts/ directory that lost its search bit fails EVERY bucket stat with
+            // EACCES, which used to yield an empty index that still called itself authoritative.
+            if (errno == ENOENT)
+                continue;
+            visit_unreadable_bucket("Failed to stat account bucket directory '" + bucket_path + "': " + std::strerror(errno));
+            continue;
+        }
+        if (!S_ISDIR(bucket_info.st_mode))
+            continue;
+
+        DIR* bucket_dir = opendir(bucket_path.c_str());
+        if (bucket_dir == nullptr) {
+            visit_unreadable_bucket("Failed to open account bucket directory '" + bucket_path + "': " + std::strerror(errno));
             continue;
         }
 
-        while (dirent* account_entry = readdir(bucket_dir)) {
+        // readdir() returns NULL both at the end of the directory and on an error, and the two are
+        // told apart only by errno -- which every stat and file read inside this loop also sets, so
+        // it is cleared immediately before each call rather than once around the loop.
+        int bucket_read_errno = 0;
+        for (;;) {
+            errno = 0;
+            dirent* account_entry = readdir(bucket_dir);
+            if (account_entry == nullptr) {
+                bucket_read_errno = errno;
+                break;
+            }
             // One shared rule for "what is even a record", used by this walker and by
             // account_storage_contains_unreadable_records. Litter is not visited at all, so it never
             // counts against MAX_QUARANTINED_RECORDS_AT_BOOT; a candidate that cannot be stat'ed is
@@ -446,9 +479,20 @@ bool for_each_account_record_on_disk(const std::string& root_directory,
         }
 
         closedir(bucket_dir);
+
+        // Reported after the directory is closed, and after every record the walk DID see: the
+        // records already visited are real, and the bucket is unreadable in addition to them.
+        if (bucket_read_errno != 0)
+            visit_unreadable_bucket("Failed to read account bucket directory '" + bucket_path + "': " + std::strerror(bucket_read_errno));
     }
 
     closedir(accounts_dir);
+    if (accounts_read_errno != 0) {
+        // The accounts directory itself is the one failure this walk reports as its own: there is no
+        // bucket to attribute it to, and an unknown number of buckets went unseen.
+        set_error(error_message, "Failed to read accounts directory '" + accounts_directory + "': " + std::strerror(accounts_read_errno));
+        return false;
+    }
     set_error(error_message, "");
     return true;
 }
