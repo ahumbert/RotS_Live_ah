@@ -59,7 +59,8 @@ try:
           m.msdp_get('CHARACTER_NAME'))
 
     out = run_cmd(m, 'account index', r'Account index:')
-    counts = re.search(r'Account index: (\d+) record\(s\) indexed, (\d+) quarantined\.', out)
+    counts = re.search(r'Account index: (\d+) record\(s\) indexed, (\d+) quarantined, '
+                       r'(\d+) unreadable since boot\.', out)
     check('`account index` reports a non-zero quarantined count',
           counts is not None and int(counts.group(2)) > 0, out[-400:])
     check('the quarantined record is listed with its path and reason',

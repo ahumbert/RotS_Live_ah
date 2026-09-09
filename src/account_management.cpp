@@ -1089,6 +1089,30 @@ namespace {
         return true;
     }
 
+    // A record the index resolved but whose file will not read. This is the ordinary shape of
+    // post-boot corruption and it is NOT reached by the write chokepoint: a login reads the record
+    // before it ever writes one, so a record that cannot be read fails here and the write never
+    // happens. Marking only at the write site therefore missed the common case entirely -- proved
+    // live: a corrupted record produced "Expected string value." at the email prompt while
+    // `account index` still reported 0 unreadable.
+    //
+    // Report-only, and once per record. See account_index::note_unreadable_at_runtime for why this
+    // must not quarantine.
+    void note_unreadable_record_at_runtime(const std::string& record_key, const std::string& record_path, const std::string& reason)
+    {
+        if (record_key.empty())
+            return;
+        if (!account_index::note_unreadable_at_runtime(record_key, reason.empty() ? "Account record could not be read." : reason))
+            return;
+
+        char log_buffer[MAX_STRING_LENGTH];
+        std::snprintf(log_buffer, sizeof(log_buffer),
+            "Account record '%s' could not be read after boot: %s (the account is still indexed; `account index` lists it)",
+            record_path.c_str(), reason.empty() ? "Account record could not be read." : reason.c_str());
+        log(log_buffer);
+        mudlog(log_buffer, BRF, LEVEL_IMMORT, TRUE);
+    }
+
     bool find_account_by_email_internal(const std::string& root_directory, const std::string& email, AccountData* account, std::string* error_message)
     {
         if (account == nullptr) {
@@ -1106,7 +1130,14 @@ namespace {
             std::string indexed_path;
             if (!account_index::find_path_by_email(email, &indexed_path, error_message))
                 return false;
-            return read_account_file_from_path(indexed_path, account, error_message);
+            std::string read_error;
+            if (read_account_file_from_path(indexed_path, account, &read_error)) {
+                set_error(error_message, "");
+                return true;
+            }
+            note_unreadable_record_at_runtime(normalize_email(email), indexed_path, read_error);
+            set_error(error_message, read_error);
+            return false;
         }
 
         const std::string normalized_email = normalize_email(email);

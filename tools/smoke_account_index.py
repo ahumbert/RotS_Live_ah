@@ -137,7 +137,8 @@ try:
 
     # --- 4. The immortal surface, while we are in the game ---------------------------------------
     out = run_cmd(m, 'account index', r'Account index:')
-    counts = re.search(r'Account index: (\d+) record\(s\) indexed, (\d+) quarantined\.', out)
+    counts = re.search(r'Account index: (\d+) record\(s\) indexed, (\d+) quarantined, '
+                       r'(\d+) unreadable since boot\.', out)
     check('`account index` reports counts', counts is not None, out[-400:])
     if counts:
         on_disk = len([1 for root, _, files in os.walk('lib/accounts') for f in files
@@ -146,6 +147,7 @@ try:
               int(counts.group(1)) == on_disk,
               'index=%s disk=%s' % (counts.group(1), on_disk))
         check('nothing is quarantined on a healthy tree', counts.group(2) == '0', out[-400:])
+        check('nothing is unreadable since boot on a healthy tree', counts.group(3) == '0', out[-400:])
 
     out = run_cmd(m, 'account index frobnicate', r'Usage: account index')
     check('an unrecognized action prints usage, not the summary',

@@ -316,7 +316,22 @@ bool read_account_file_uncached(const std::string& root_directory, const std::st
     if (!find_account_file_path_by_account_name(root_directory, account_name, &account_path, error_message))
         return false;
 
-    return read_account_file_from_path(account_path, account, error_message);
+    std::string read_error;
+    if (read_account_file_from_path(account_path, account, &read_error)) {
+        set_error(error_message, "");
+        return true;
+    }
+
+    // The by-name twin of the by-email case in find_account_by_email_internal. Keyed by email
+    // because that is what the index keys a record by; if the name no longer resolves to one there
+    // is nothing to mark, and the read failure still reports normally.
+    if (account_index_is_authoritative_for(root_directory)) {
+        std::string record_key;
+        if (account_index::find_email_by_account_name(account_name, &record_key, nullptr))
+            note_unreadable_record_at_runtime(record_key, account_path, read_error);
+    }
+    set_error(error_message, read_error);
+    return false;
 }
 
 bool read_account_file(const std::string& root_directory, const std::string& account_name, AccountData* account, std::string* error_message)
