@@ -23,6 +23,8 @@
 #include <unistd.h>
 #include <vector>
 
+void build_account_native_player_index(void);
+
 extern struct player_index_element* player_table;
 extern struct room_data world;
 extern struct index_data* obj_index;
@@ -530,6 +532,33 @@ TEST(DbLoader, RejectsMalformedPlayerTextWithoutLongStringTerminator)
                                          "end\n";
 
     EXPECT_LT(load_char_from_text(player_name, malformed_player_text, &character_data), 0);
+}
+
+TEST(DbLoader, DoesNotLeaveTheAccountIndexAuthoritativeWhenTheAccountsDirectoryCannotBeWalked)
+{
+    // A walk that fails for any reason other than "there are no accounts yet" leaves the index
+    // empty. If it stays enabled, every resolver answers "No account exists for that email address."
+    // for every player on the box -- the exact string interpre.cpp matches to offer registration.
+    // Falling back to the directory scan reports the real error instead and offers nothing.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+
+    // A regular file where the accounts directory belongs: opendir fails with ENOTDIR, which is
+    // deterministic whatever uid the test runs as.
+    write_file(temp_directory.path() + "/accounts", "not a directory");
+
+    account_index::clear();
+    account_index::set_root_directory(".");
+    account_index::set_enabled(true);
+
+    build_account_native_player_index();
+
+    const bool still_enabled = account_index::is_enabled();
+    account_index::set_enabled(false);
+    account_index::clear();
+
+    EXPECT_FALSE(still_enabled)
+        << "an empty index must not stay authoritative after the accounts walk failed";
 }
 
 TEST(DbLoader, LegacyPlayerTextRoundTripPreservesCombatState)
@@ -1897,3 +1926,33 @@ TEST(DbLoader, FailsClosedWhenTemporaryExploitPathAlreadyExists)
     EXPECT_FALSE(write_exploit_record_for_character(temp_directory.path(), "aragorn", new_record, &error_message));
     EXPECT_NE(error_message.find("temporary exploit file"), std::string::npos);
 }
+
+TEST(DbLoader, DoesNotTrustTheIndexWhenAnAccountBucketCannotBeRead)
+{
+    // Five letter buckets exist (A-E, F-J, K-O, P-T, U-Z) and each unreadable bucket files as ONE
+    // quarantined record, so a chmod accident across accounts/ yields exactly 5 -- which does not
+    // exceed MAX_QUARANTINED_RECORDS_AT_BOOT and so boots with an authoritative, EMPTY index. Every
+    // login is then told no account exists. One unreadable bucket is already enough to mean the
+    // index is missing an unknown number of accounts, so it must not speak for the tree.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+
+    ASSERT_EQ(mkdir("accounts", 0700), 0);
+    ASSERT_EQ(mkdir("accounts/P-T", 0700), 0);
+    ASSERT_EQ(chmod("accounts/P-T", 0000), 0);
+
+    account_index::clear();
+    account_index::set_root_directory(".");
+    account_index::set_enabled(true);
+
+    build_account_native_player_index();
+
+    const bool still_enabled = account_index::is_enabled();
+    chmod("accounts/P-T", 0700);
+    account_index::set_enabled(false);
+    account_index::clear();
+
+    EXPECT_FALSE(still_enabled)
+        << "a bucket the server cannot read leaves the index incomplete, so it must not be authoritative";
+}
+

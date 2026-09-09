@@ -161,16 +161,22 @@ namespace {
     }
 
     // Drops every key owned by this email except the entry itself.
+    // Every account name this address currently claims. A disputed address holds more than one, and
+    // the entry can only ever remember the last -- which stranded the others in g_account_names for
+    // good. Mirrors g_owned_characters so both key kinds are withdrawn the same way.
+    std::map<std::string, std::vector<std::string>> g_owned_account_names;
+
     void erase_owned_keys(const std::string& email)
     {
         // O(1) rather than a walk of every indexed account name: an email owns exactly one account
         // name and the entry already stores it. This runs on every upsert, and upserts run on the
         // login path (clear_account_login_failures fires on every successful login), so the walk was
         // O(accounts) per login for a key we already had in hand.
-        const auto entry = g_entries.find(email);
-        if (entry != g_entries.end() && !entry->second.normalized_account_name.empty()) {
-            withdraw_key_claim(g_account_names, g_contested_account_names,
-                entry->second.normalized_account_name, email);
+        const auto owned_names = g_owned_account_names.find(email);
+        if (owned_names != g_owned_account_names.end()) {
+            for (const std::string& account_name_key : owned_names->second)
+                withdraw_key_claim(g_account_names, g_contested_account_names, account_name_key, email);
+            g_owned_account_names.erase(owned_names);
         }
 
         const auto owned = g_owned_characters.find(email);
@@ -228,7 +234,15 @@ void upsert(const account::AccountData& account, const std::string& record_path,
     if (legacy_flat_layout && existing != g_entries.end() && !existing->second.legacy_flat_layout)
         return;
 
-    erase_owned_keys(email);
+    // A disputed address is two records on disk, which only an operator can produce (a half-finished
+    // migration, a restored backup). Before the index, the email lookup refused but the SEPARATE
+    // character scan still resolved every character on both records. Withdrawing the incumbent's
+    // claims here made its characters read as unlinked instead, and save_char then refuses the
+    // legacy fallback for them -- silent save loss for the record that happened to be indexed first.
+    // Keep both records' claims: the address itself still refuses, downstream, where paths resolve.
+    const bool address_is_disputed = g_contested_emails.count(email) != 0;
+    if (!address_is_disputed)
+        erase_owned_keys(email);
 
     Entry entry;
     entry.normalized_email = email;
@@ -237,20 +251,34 @@ void upsert(const account::AccountData& account, const std::string& record_path,
     entry.legacy_flat_layout = legacy_flat_layout;
     g_entries[email] = entry;
 
-    // erase_owned_keys above already withdrew every claim this email held, so claim_key sees this
+    // On an undisputed address erase_owned_keys above withdrew every claim this email held, so
+    // claim_key sees this
     // record as a fresh claimant of exactly the keys the record declares NOW. A key that is still
     // held is held by a DIFFERENT email, and claim_key turns that into contention rather than
     // overwriting -- overwriting an account name would let write_account_file delete the other
     // record's file, and overwriting a character would send that character's saves to whichever
     // record was written last.
-    if (!entry.normalized_account_name.empty())
-        claim_key(g_account_names, g_contested_account_names, entry.normalized_account_name, email);
+    if (!entry.normalized_account_name.empty()) {
+        std::vector<std::string>& owned_names = g_owned_account_names[email];
+        if (std::find(owned_names.begin(), owned_names.end(), entry.normalized_account_name) == owned_names.end()) {
+            claim_key(g_account_names, g_contested_account_names, entry.normalized_account_name, email);
+            owned_names.push_back(entry.normalized_account_name);
+        }
+    }
 
     std::vector<std::string> owned;
-    owned.reserve(account.characters.size());
+    if (address_is_disputed) {
+        // Carry the incumbent's keys forward so a later erase still withdraws all of them.
+        const auto previously_owned = g_owned_characters.find(email);
+        if (previously_owned != g_owned_characters.end())
+            owned = previously_owned->second;
+    }
+    owned.reserve(owned.size() + account.characters.size());
     for (const std::string& character_name : account.characters) {
         const std::string character_key = account::normalize_account_name(character_name);
         if (character_key.empty())
+            continue;
+        if (std::find(owned.begin(), owned.end(), character_key) != owned.end())
             continue;
         claim_key(g_characters, g_contested_characters, character_key, email);
         owned.push_back(character_key);
@@ -549,6 +577,7 @@ std::vector<ContestedKey> contested_keys()
 
 void clear()
 {
+    g_owned_account_names.clear();
     g_entries.clear();
     g_account_names.clear();
     g_characters.clear();
@@ -585,17 +614,6 @@ bool is_enabled()
 }
 
 namespace {
-
-    std::string join_claimants(const std::set<std::string>& claimants)
-    {
-        std::string joined;
-        for (const std::string& claimant : claimants) {
-            if (!joined.empty())
-                joined += ", ";
-            joined += claimant;
-        }
-        return joined;
-    }
 
 } // namespace
 

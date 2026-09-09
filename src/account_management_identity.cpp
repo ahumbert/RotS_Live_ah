@@ -470,7 +470,22 @@ bool create_account(const std::string& root_directory, const std::string& accoun
     // index knows it is unusable. Without this, a future direct caller would create a fresh account
     // straight over a real player's record. Reached today only via create_account_for_email, whose
     // own guard has already refused, so this changes no live behaviour.
-    if (account_index_is_authoritative_for(root_directory) && account_index::is_quarantined(email)) {
+    // An address the index already holds is TAKEN, whether or not its record still reads. Without
+    // this, a record that went unreadable after boot fails find_account_by_email_internal's read, the
+    // address reads as free, and a second record is written at the same email -- which the next boot
+    // sees as two records disputing one address and refuses permanently. The write-time
+    // "Existing account file could not be read safely." guard does not cover it: that inspects the
+    // DIRECTORY path, and a legacy flat record has nothing there.
+    if (account_index_is_authoritative_for(root_directory)) {
+        std::string occupied_path;
+        if (account_index::find_path_by_email(email, &occupied_path, nullptr)) {
+            set_error(error_message, "An account already exists for that email address.");
+            return false;
+        }
+    }
+
+    if (account_index_is_authoritative_for(root_directory)
+        && (account_index::is_quarantined(email) || email_bucket_is_quarantined(root_directory, email))) {
         set_error(error_message, "That email address cannot be used right now.");
         return false;
     }
@@ -528,7 +543,22 @@ bool create_account_for_email(const std::string& root_directory, const std::stri
     // address is free" and let a new account overwrite a real player's unparseable-but-real record.
     // Guarded the same way as the resolver fast paths: the index only speaks for the tree it was
     // built against.
-    if (account_index_is_authoritative_for(root_directory) && account_index::is_quarantined(email)) {
+    // An address the index already holds is TAKEN, whether or not its record still reads. Without
+    // this, a record that went unreadable after boot fails find_account_by_email_internal's read, the
+    // address reads as free, and a second record is written at the same email -- which the next boot
+    // sees as two records disputing one address and refuses permanently. The write-time
+    // "Existing account file could not be read safely." guard does not cover it: that inspects the
+    // DIRECTORY path, and a legacy flat record has nothing there.
+    if (account_index_is_authoritative_for(root_directory)) {
+        std::string occupied_path;
+        if (account_index::find_path_by_email(email, &occupied_path, nullptr)) {
+            set_error(error_message, "An account already exists for that email address.");
+            return false;
+        }
+    }
+
+    if (account_index_is_authoritative_for(root_directory)
+        && (account_index::is_quarantined(email) || email_bucket_is_quarantined(root_directory, email))) {
         set_error(error_message, "That email address cannot be used right now.");
         return false;
     }

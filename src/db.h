@@ -267,6 +267,10 @@ struct ban_list_element {
     struct ban_list_element* next;
 };
 
+// Builds the account index and the account-native half of the player table at boot. Declared here
+// rather than kept file-local so its boot-failure behaviour can be tested.
+void build_account_native_player_index(void);
+
 extern char buf[MAX_STRING_LENGTH];
 extern char buf1[MAX_STRING_LENGTH];
 extern char buf2[MAX_STRING_LENGTH];

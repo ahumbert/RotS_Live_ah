@@ -269,6 +269,27 @@ bool write_account_file(const std::string& root_directory, const AccountData& ac
         return false;
     }
 
+    // The record is at its final path from here on, so the cache and the index must describe it
+    // BEFORE the retirement steps below -- each of those can fail and return, and returning with the
+    // new account.json in place but the old keys still indexed loses every save for a character that
+    // write just linked (it resolves as unlinked, and save_char refuses the legacy fallback).
+    //
+    // Single account.json write chokepoint: flush the cache so subsequent reads see the new state.
+    if (account_cache::is_enabled())
+        account_cache::invalidate_all();
+
+    // Same chokepoint. The index re-derives every key from the record just written, so link, unlink,
+    // rename and an account-name change are all handled without diffing against what was there
+    // before.
+    //
+    // Root-guarded, the other half of the resolvers' matches_root() guard: final_path was composed
+    // against THIS caller's root, and the index holds paths for one tree only. Indexing a foreign
+    // root's path would leave lookups against the real (".") tree serving a path into that other
+    // tree. Deliberately NOT gated on is_enabled(): the index is maintained on every write whether
+    // or not the resolvers currently consult it.
+    if (account_index::matches_root(root_directory))
+        account_index::upsert(normalized_account, final_path);
+
     if (found_existing_account_path && existing_account_path != final_path) {
         if (std::remove(existing_account_path.c_str()) != 0 && errno != ENOENT) {
             set_error(error_message, "Failed to retire stale account file '" + existing_account_path + "': " + std::strerror(errno));
@@ -280,23 +301,6 @@ bool write_account_file(const std::string& root_directory, const AccountData& ac
         set_error(error_message, "Failed to retire legacy account file '" + legacy_flat_path + "': " + std::strerror(errno));
         return false;
     }
-
-    // Single account.json write chokepoint: flush the cache so subsequent reads see the new state.
-    if (account_cache::is_enabled())
-        account_cache::invalidate_all();
-
-    // Same chokepoint, same condition: after the rename, only on a fully successful write. The
-    // index re-derives every key from the record just written, so link, unlink, rename and an
-    // account-name change are all handled without diffing against what was there before.
-    //
-    // Root-guarded, the other half of the resolvers' matches_root() guard: final_path was composed
-    // against THIS caller's root, and the index holds paths for one tree only. Indexing a foreign
-    // root's path would leave lookups against the real (".") tree serving a path into that other
-    // tree. Deliberately NOT gated on is_enabled(): the index is maintained on every write whether
-    // or not the resolvers currently consult it, which is what lets `account index on` arm
-    // immediately instead of having to rebuild (act_wiz.cpp's toggle relies on this).
-    if (account_index::matches_root(root_directory))
-        account_index::upsert(normalized_account, final_path);
 
     set_error(error_message, "");
     return true;
@@ -397,6 +401,7 @@ bool for_each_account_record_on_disk(const std::string& root_directory,
             record.record_path = bucket_path;
             record.directory_layout = false;
             record.parsed = false;
+            record.unreadable_bucket = true;
             record.failure_reason = "Failed to open account bucket directory '" + bucket_path + "': " + std::strerror(errno);
             visitor(record);
             continue;
@@ -450,8 +455,14 @@ bool for_each_account_record_on_disk(const std::string& root_directory,
 
 std::string account_index_quarantine_key(const AccountRecordOnDisk& record)
 {
-    if (record.directory_layout)
-        return record.directory_entry_name;
+    if (record.directory_layout) {
+        // Email-shaped, so normalize it: the server writes this directory name normalized, but a
+        // hand-made or restored directory need not be, and on a case-sensitive filesystem the raw
+        // name is a key is_quarantined() can never produce -- leaving the address readable as free
+        // and registration free to proceed over an unreadable record. The path-shaped cases below
+        // are deliberately NOT normalized; lowercasing a real path corrupts it.
+        return normalize_email(record.directory_entry_name);
+    }
     if (record.parsed) {
         // A parsed legacy flat record is keyed by its own email UNLESS that email is empty (the
         // "no usable email address" case, db.cpp), in which case it has revealed nothing to key it

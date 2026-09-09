@@ -3196,13 +3196,15 @@ ACMD(do_account)
         // resolves and still saves -- the server simply could not read its file at some point after
         // boot. Without this listing that failure appears nowhere in the game at all.
         for (const account_index::Entry& entry : account_index::unreadable_at_runtime_entries()) {
-            sprintf(buf1, "  UNREADABLE SINCE BOOT %s (%s): %s\n\r", entry.normalized_email.c_str(),
+            // Bounded for the same reason the CONTESTED line below is: the reason string is reader
+            // output of unbounded length and buf1 is a fixed MAX_STRING_LENGTH buffer.
+            snprintf(buf1, MAX_STRING_LENGTH, "  UNREADABLE SINCE BOOT %s (%s): %s\n\r", entry.normalized_email.c_str(),
                 entry.record_path.c_str(), entry.unreadable_at_runtime_reason.c_str());
             send_to_char(buf1, ch);
         }
 
         for (const account_index::Entry& entry : account_index::quarantined_entries()) {
-            sprintf(buf1, "  QUARANTINED %s (%s): %s\n\r", entry.normalized_email.c_str(),
+            snprintf(buf1, MAX_STRING_LENGTH, "  QUARANTINED %s (%s): %s\n\r", entry.normalized_email.c_str(),
                 entry.record_path.c_str(), entry.quarantine_reason.c_str());
             send_to_char(buf1, ch);
         }

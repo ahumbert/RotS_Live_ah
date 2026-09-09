@@ -579,6 +579,22 @@ namespace {
     // foreground/background mode. A
     // zero there is "unset", so accepting the default is right -- but a CHANGE from one non-zero
     // value to another is real loss and is still caught.
+    // Fields the JSON path deliberately does not round-trip. Neutralizing them here keeps the guard
+    // pointed at real, unintended loss instead of refusing conversions over transforms we chose.
+    void neutralize_known_lossy_transforms(const char_file_u& source, char_file_u* comparable)
+    {
+        // PLR_CRASH is a transient inventory-dirty marker. The legacy saver persists it, but
+        // apply_character_data_to_store masks it off on load on purpose (character_json.cpp), so a
+        // readback can never carry it. It is set on any inventory change, so nearly half of live
+        // characters have it on disk; comparing it would refuse them all.
+        comparable->specials2.act = (comparable->specials2.act & ~PLR_CRASH) | (source.specials2.act & PLR_CRASH);
+
+        // bad_pws is persisted by the legacy loader/saver (db.cpp) but is not part of the character
+        // JSON at all. It is a failed-login counter that is shown once at the next login and then
+        // reset, so conversion drops at most one such notice.
+        comparable->specials2.bad_pws = source.specials2.bad_pws;
+    }
+
     void neutralize_defaulted_on_unset(const char_file_u& source, char_file_u* comparable)
     {
         if (source.specials2.tactics == 0)
@@ -601,6 +617,7 @@ namespace {
     {
         char_file_u expected = readback;
         neutralize_defaulted_on_unset(source, &expected);
+        neutralize_known_lossy_transforms(source, &expected);
 
 #define FIELD_DIFFERS(f) (std::memcmp(&source.f, &expected.f, sizeof(source.f)) != 0)
         if (source.sex != expected.sex) return "sex";

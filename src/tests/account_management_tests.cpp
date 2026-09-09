@@ -1960,6 +1960,124 @@ TEST(AccountManagement, MigratesLegacyCharacterFilesIntoAccountNativeAssetsWitho
         << "Expected successful migration to rely on account-native assets without persisting a transitional snapshot file.";
 }
 
+TEST(AccountManagement, KeepsTheIndexCurrentWhenRetiringALegacyAccountFileFails)
+{
+    // The upsert sits after the two post-rename retirement steps, so a retirement that fails leaves
+    // account.json in place on disk with the index still holding the pre-write keys. A character
+    // linked by that write is then missing from the index, save_char resolves it as unlinked and
+    // refuses the legacy fallback -- silent total save loss until the next reboot.
+    TemporaryDirectory temp_directory;
+    const std::string root = temp_directory.path();
+    std::string error_message;
+
+    account::AccountData account_data;
+    ASSERT_TRUE(account::create_account(root, "alpha-admin", "player@example.com", "ValidPass1", 1700007776, &account_data, &error_message)) << error_message;
+
+    // A non-empty directory where the legacy flat record would be: std::remove fails with ENOTEMPTY,
+    // which needs no permission games and so behaves the same whatever uid the tests run as.
+    const std::string legacy_bucket = root + "/accounts/" + account::account_bucket_for_name("alpha-admin");
+    const std::string legacy_flat_path = legacy_bucket + "/alpha-admin.json";
+    mkdir(legacy_bucket.c_str(), 0700);
+    ASSERT_EQ(mkdir(legacy_flat_path.c_str(), 0700), 0);
+    write_text_file(legacy_flat_path + "/occupant", "keeps the directory non-empty");
+
+    account_index::clear();
+    account_index::set_root_directory(root);
+    account_index::set_enabled(true);
+
+    EXPECT_FALSE(account::write_account_file(root, account_data, &error_message))
+        << "a failed retirement must still be reported";
+
+    std::string indexed_path;
+    const bool index_knows_the_record = account_index::find_path_by_email("player@example.com", &indexed_path, nullptr);
+
+    account_index::set_enabled(false);
+    account_index::clear();
+
+    EXPECT_TRUE(index_knows_the_record)
+        << "account.json is on disk after the rename, so the index must reflect it even though retirement failed";
+}
+
+TEST(AccountManagement, RefusesRegistrationWhoseEmailLivesInsideAnUnreadableAccountBucket)
+{
+    // A bucket directory that will not opendir() is filed by the boot walk as ONE quarantined record
+    // keyed by the bucket's own path -- the accounts inside it are never seen, so none of their
+    // emails is quarantined individually. is_quarantined(email) normalizes its argument and can
+    // never match a path-shaped key, so the registration guard waves through every player in that
+    // bucket and writes a fresh account over a real record.
+    TemporaryDirectory temp_directory;
+    const std::string root = temp_directory.path();
+    std::string error_message;
+
+    const std::string bucket_path = root + "/accounts/" + account::account_bucket_for_name("player@example.com");
+    account_index::clear();
+    account_index::set_root_directory(root);
+    account_index::set_enabled(true);
+    account_index::quarantine(bucket_path, bucket_path, "Failed to open account bucket directory");
+
+    const bool created = account::create_account_for_email(root, "player@example.com", "ValidPass1", 1700007776, nullptr, &error_message);
+
+    account_index::set_enabled(false);
+    account_index::clear();
+
+    EXPECT_FALSE(created)
+        << "registering into a bucket the server cannot read writes a new account over a real player's record";
+}
+
+TEST(AccountManagement, MigratesLegacyCharacterWhosePersistedActCarriesTheCrashFlag)
+{
+    // PLR_CRASH is set on any inventory change (handler.cpp) and persisted by the legacy saver, but
+    // the JSON loader masks it off by design. Conversion must still be allowed: on live data 3260 of
+    // 6906 character records carry this bit, and refusing them all strands nearly half the player base.
+    TemporaryDirectory temp_directory;
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(temp_directory.path(), "alpha-admin", "player@example.com", "ValidPass1", 1700007776, nullptr, &error_message)) << error_message;
+
+    ASSERT_EQ(mkdir((temp_directory.path() + "/players").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/players/A-E").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/plrobjs").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/plrobjs/A-E").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/exploits").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/exploits/A-E").c_str(), 0700), 0);
+
+    char_file_u stored_character = make_stored_character("aragorn");
+    stored_character.specials2.act |= PLR_CRASH;
+    write_valid_legacy_player_file(temp_directory.path(), stored_character);
+    write_text_file(account::legacy_object_file_path(temp_directory.path(), "aragorn"), make_valid_object_bytes());
+    write_text_file(account::legacy_exploits_file_path(temp_directory.path(), "aragorn"), make_valid_exploit_bytes());
+
+    account::CharacterMigrationData migration;
+    EXPECT_TRUE(account::migrate_legacy_character_by_name(temp_directory.path(), "alpha-admin", "aragorn", 1700007777, &migration, &error_message))
+        << "Expected a character carrying the transient PLR_CRASH bit to convert. Error: " << error_message;
+}
+
+TEST(AccountManagement, MigratesLegacyCharacterWhosePersistedBadPasswordCountIsNonZero)
+{
+    // specials2.bad_pws is persisted by the legacy saver (db.cpp) but never serialized to JSON. A
+    // failed login increments it and saves, so this is the ordinary on-disk state of exactly the
+    // offline character an immortal migrates by hand.
+    TemporaryDirectory temp_directory;
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(temp_directory.path(), "alpha-admin", "player@example.com", "ValidPass1", 1700007776, nullptr, &error_message)) << error_message;
+
+    ASSERT_EQ(mkdir((temp_directory.path() + "/players").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/players/A-E").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/plrobjs").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/plrobjs/A-E").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/exploits").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/exploits/A-E").c_str(), 0700), 0);
+
+    char_file_u stored_character = make_stored_character("aragorn");
+    stored_character.specials2.bad_pws = 3;
+    write_valid_legacy_player_file(temp_directory.path(), stored_character);
+    write_text_file(account::legacy_object_file_path(temp_directory.path(), "aragorn"), make_valid_object_bytes());
+    write_text_file(account::legacy_exploits_file_path(temp_directory.path(), "aragorn"), make_valid_exploit_bytes());
+
+    account::CharacterMigrationData migration;
+    EXPECT_TRUE(account::migrate_legacy_character_by_name(temp_directory.path(), "alpha-admin", "aragorn", 1700007777, &migration, &error_message))
+        << "Expected a character with a non-zero bad-password count to convert. Error: " << error_message;
+}
+
 TEST(AccountManagement, PersistedMigrationSnapshotOmitsLegacyPlayerPasswordAndHostData)
 {
     TemporaryDirectory temp_directory;
@@ -4715,4 +4833,45 @@ TEST(AccountManagement, StillConvertsACharacterThatSurvivesTheRoundTrip)
         "ValidPass1", "aragorn", 1700012223, &linked_account, &migration, &error_message))
         << error_message;
     EXPECT_TRUE(account::account_has_character(linked_account, "aragorn"));
+}
+
+TEST(AccountManagement, RefusesRegistrationForAnAddressWhoseIndexedRecordWillNotRead)
+{
+    // The write-time occupancy check reads final_path, which is always the DIRECTORY layout. A legacy
+    // flat record that parsed at boot and became unreadable afterwards is therefore never consulted:
+    // find_account_by_email_internal fails its read, the address reads as free, and a second record
+    // is written at the same email. The next boot sees two records disputing one address and refuses
+    // it permanently -- the real player can no longer log in.
+    TemporaryDirectory temp_directory;
+    const std::string root = temp_directory.path();
+    std::string error_message;
+
+    // A legacy FLAT record is the whole story for this address: nothing sits at the directory path,
+    // so the write-time guard has nothing to refuse on and only the index knows the address is taken.
+    const std::string bucket = root + "/accounts/" + account::account_bucket_for_name("alpha-admin");
+    ASSERT_EQ(mkdir((root + "/accounts").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir(bucket.c_str(), 0700), 0);
+    const std::string flat_path = bucket + "/alpha-admin.json";
+    write_text_file(flat_path, "{ no longer valid json");
+
+    account::AccountData indexed_record;
+    indexed_record.normalized_email = "player@example.com";
+    indexed_record.account_name = "alpha-admin";
+
+    account_index::clear();
+    account_index::set_root_directory(root);
+    account_index::set_enabled(true);
+    account_index::upsert(indexed_record, flat_path, true);
+
+    std::string indexed_path;
+    ASSERT_TRUE(account_index::find_path_by_email("player@example.com", &indexed_path, nullptr))
+        << "the address must be indexed for this to test anything";
+
+    const bool created = account::create_account_for_email(root, "player@example.com", "ValidPass2", 1700007777, nullptr, &error_message);
+
+    account_index::set_enabled(false);
+    account_index::clear();
+
+    EXPECT_FALSE(created)
+        << "an address the index already holds must stay occupied even when its record will not read";
 }

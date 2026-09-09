@@ -194,12 +194,6 @@ bool matches_root(const std::string& root_directory);
 void set_enabled(bool enabled);
 bool is_enabled();
 
-// Compares the live index against a freshly enumerated view of what is on disk and returns one
-// human-readable line per disagreement (missing, extra, or a differing path or account name).
-// Empty means the index and the disk agree. Takes the disk view as an argument rather than reading
-// it, so this is testable without a filesystem and so the caller owns the (readdir) enumeration.
-//
-
 } // namespace account_index
 
 #endif

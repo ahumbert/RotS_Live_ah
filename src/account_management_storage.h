@@ -59,6 +59,9 @@ struct AccountRecordOnDisk {
     // True when this record came from the directory layout (<email>/account.json), false for the
     // legacy flat layout (<name>.json). Taken from stat(), not guessed from the entry name.
     bool directory_layout = false;
+    // True when this "record" is really a bucket DIRECTORY that would not open. It stands in for an
+    // unknown number of real accounts, so callers must not treat it as one missing record.
+    bool unreadable_bucket = false;
     AccountData account;
     std::string failure_reason;
 };

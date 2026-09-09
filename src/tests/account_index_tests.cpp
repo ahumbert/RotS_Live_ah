@@ -1801,3 +1801,89 @@ TEST_F(AccountIndexTest, ARecordThatGoesBadAfterBootIsMarkedWhenTheWriteChokepoi
 
     account_index::set_root_directory(".");
 }
+
+TEST(AccountIndexUpsert, KeepsTheIncumbentRecordsCharacterClaimsWhenASecondRecordSharesItsEmail)
+{
+    // Two files at one address with disagreeing account names -- reachable only by an operator (a
+    // half-finished migration, a restored backup), never by registration. Before the index, the
+    // email lookup refused but the separate character scan still resolved every character on BOTH
+    // records. The second upsert now withdraws the first record's claims, so its characters resolve
+    // as unlinked instead of refusing, and save_char declines the legacy fallback for them.
+    account_index::clear();
+
+    account_index::upsert(make_account("player@example.com", "alpha-admin", { "Aragorn" }),
+        "accounts/A-E/alpha-admin.json", true);
+    account_index::upsert(make_account("player@example.com", "beta-admin", { "Boromir" }),
+        "accounts/P-T/player@example.com/account.json", false);
+
+    ASSERT_TRUE(account_index::is_email_ambiguous("player@example.com"))
+        << "the two records must be recorded as disputing the address";
+
+    // Before the index, find_character_owner_account scanned files and resolved every character on
+    // BOTH records; only the email lookup refused. Both must still resolve to their owner here --
+    // the disputed address is refused downstream, where find_path_by_email answers.
+    std::string owner_email;
+    EXPECT_TRUE(account_index::find_owner_email_by_character("Aragorn", &owner_email, nullptr))
+        << "the incumbent's character must survive a second record claiming its address";
+    EXPECT_EQ(owner_email, "player@example.com");
+
+    owner_email.clear();
+    EXPECT_TRUE(account_index::find_owner_email_by_character("Boromir", &owner_email, nullptr));
+    EXPECT_EQ(owner_email, "player@example.com");
+
+    account_index::clear();
+}
+
+TEST(AccountIndexQuarantine, ReservesTheAddressOfADirectoryRecordWhoseDirectoryNameIsNotNormalized)
+{
+    // A directory-layout record is keyed by its directory name. The server always writes that name
+    // normalized, but a hand-made or restored directory need not be, and on a case-sensitive
+    // filesystem the raw name is then a key is_quarantined() -- which normalizes its argument --
+    // can never produce. The address would read as free and registration would proceed over it.
+    account_index::clear();
+
+    account::AccountRecordOnDisk record;
+    record.directory_entry_name = "Player@Example.com";
+    record.record_path = "accounts/P-T/Player@Example.com/account.json";
+    record.directory_layout = true;
+    record.parsed = false;
+
+    account_index::quarantine(account::account_index_quarantine_key(record), record.record_path,
+        "unreadable record");
+
+    EXPECT_TRUE(account_index::is_quarantined("player@example.com"))
+        << "a quarantined record must keep its address reserved however its directory is cased";
+
+    account_index::clear();
+}
+
+TEST(AccountIndexUpsert, WithdrawsAStrandedAccountNameOnceTheDisputeSettles)
+{
+    // Keeping both records' claims while an address is disputed must not strand a key forever.
+    // erase_owned_keys can only withdraw the name held in the CURRENT entry, so the incumbent's name
+    // survives every later rewrite -- and once the dispute settles it resolves again, handing out a
+    // record that no longer carries that name.
+    account_index::clear();
+
+    account_index::upsert(make_account("player@example.com", "alpha-admin", {}),
+        "accounts/A-E/alpha-admin.json", true);
+    account_index::upsert(make_account("player@example.com", "beta-admin", {}),
+        "accounts/P-T/player@example.com/account.json", false);
+    ASSERT_TRUE(account_index::is_email_ambiguous("player@example.com"));
+
+    // The operator repairs the flat record so both now declare the same account name.
+    account_index::upsert(make_account("player@example.com", "beta-admin", {}),
+        "accounts/A-E/alpha-admin.json", true);
+    ASSERT_FALSE(account_index::is_email_ambiguous("player@example.com"))
+        << "agreeing records must settle the address";
+
+    // The next ordinary rewrite of the surviving record must clear out what the dispute left behind.
+    account_index::upsert(make_account("player@example.com", "beta-admin", {}),
+        "accounts/P-T/player@example.com/account.json", false);
+
+    std::string resolved_path;
+    EXPECT_FALSE(account_index::find_path_by_account_name("alpha-admin", &resolved_path, nullptr))
+        << "no record declares 'alpha-admin' any more, so it must not resolve";
+
+    account_index::clear();
+}

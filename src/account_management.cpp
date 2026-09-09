@@ -1253,6 +1253,17 @@ namespace {
         return account_index_quarantine_key(record);
     }
 
+    // True when the bucket this email would live in is itself quarantined. A bucket that would not
+    // opendir() is filed as ONE record under its own path, so the accounts inside it were never
+    // enumerated and none of their addresses is quarantined individually. is_quarantined() is keyed
+    // by email and can never match a path-shaped key, which left every player in that bucket able to
+    // register a fresh account straight over their own unreadable record.
+    bool email_bucket_is_quarantined(const std::string& root_directory, const std::string& email)
+    {
+        const std::string bucket_path = root_directory + "/accounts/" + account_bucket_for_name(normalize_email(email));
+        return account_index::is_quarantined_record_key(account_index_key_for_unreadable_bucket(bucket_path));
+    }
+
     // "The index speaks for this tree": enabled AND built against this root. Every fast path in this
     // file is guarded by exactly this pair -- the index holds paths and keys for one tree only, so
     // answering a caller working against a different root would hand back this tree's answers.

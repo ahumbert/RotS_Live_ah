@@ -639,10 +639,14 @@ namespace {
     // be selected, and the player is simply told it does not exist. The count is mudlogged beside
     // the quarantine count so it is seen rather than found later.
     std::size_t g_unreadable_character_files_at_boot = 0;
+    // Buckets that would not open during the walk. Each one hides an unknown number of accounts.
+    std::size_t g_unreadable_buckets_at_boot = 0;
 
     void visit_account_record_for_boot_index(const account::AccountRecordOnDisk& record)
     {
         if (!record.parsed) {
+            if (record.unreadable_bucket)
+                ++g_unreadable_buckets_at_boot;
             // The single most likely failure -- a corrupt account.json -- must leave per-record
             // evidence in the log, not just the aggregate count; this mirrors the message the
             // exit(1) it replaced used to print.
@@ -749,43 +753,6 @@ namespace {
 
 } // namespace
 
-void build_account_native_player_index(void)
-{
-    std::string error_message;
-    if (!account::for_each_account_record_on_disk(".", visit_account_record_for_boot_index, &error_message))
-        return;
-
-    const std::size_t quarantined = account_index::quarantined_count();
-    if (quarantined > 0) {
-        sprintf(buf, "Account index: %lu record(s) quarantined; use the account index wizard command to list them.",
-            static_cast<unsigned long>(quarantined));
-        log(buf);
-        mudlog(buf, BRF, LEVEL_IMMORT, TRUE);
-    }
-
-    if (g_unreadable_character_files_at_boot > 0) {
-        // Not fatal and deliberately not counted against MAX_QUARANTINED_RECORDS_AT_BOOT: a bad
-        // character file is not the account's failure, and refusing the boot over one would lock
-        // its owner out of every other character they own. But it must not be silent -- each of
-        // these is a character that cannot be selected, and the player is told only that it does
-        // not exist.
-        sprintf(buf, "Account index: %lu account-native character file(s) could not be read and are NOT in the player index; see the per-character lines above.",
-            static_cast<unsigned long>(g_unreadable_character_files_at_boot));
-        log(buf);
-        mudlog(buf, BRF, LEVEL_IMMORT, TRUE);
-    }
-
-    if (quarantined > account_index::MAX_QUARANTINED_RECORDS_AT_BOOT) {
-        sprintf(buf, "Account index: %lu unusable account records exceeds the limit of %lu. Refusing to boot.",
-            static_cast<unsigned long>(quarantined),
-            static_cast<unsigned long>(account_index::MAX_QUARANTINED_RECORDS_AT_BOOT));
-        log(buf);
-        exit(1);
-    }
-
-    sprintf(buf, "Account index: %lu account(s) indexed.", static_cast<unsigned long>(account_index::size()));
-    log(buf);
-}
 
 int load_player_from_account_json_path(char* name, const char* player_path, struct char_file_u* char_element)
 {
@@ -824,6 +791,86 @@ int load_player_from_account_json_path(char* name, const char* player_path, stru
 }
 
 } // namespace
+
+void build_account_native_player_index(void)
+{
+    // Per run, not per process: this is no longer only ever called once from boot_db.
+    g_unreadable_character_files_at_boot = 0;
+    g_unreadable_buckets_at_boot = 0;
+
+    std::string error_message;
+    if (!account::for_each_account_record_on_disk(".", visit_account_record_for_boot_index, &error_message)) {
+        // "No accounts directory yet" is a legitimate first boot: the index is correctly empty and
+        // stays authoritative. Any OTHER failure (EACCES after a hand deploy, EMFILE/ENFILE) means
+        // the index is empty because the directory could not be read, not because there is nothing
+        // in it -- and an empty authoritative index answers every login with "No account exists for
+        // that email address.", the exact string interpre.cpp matches to offer the player a NEW
+        // account. Every player on the box would be told their account is gone and invited to
+        // register over it. Fall back to the directory scan, which reports the real error instead.
+        if (access("./accounts", F_OK) != 0 && errno == ENOENT)
+            return;
+
+        sprintf(buf, "Account index: %s. The index is NOT authoritative; account lookups fall back to scanning.",
+            error_message.c_str());
+        log(buf);
+        mudlog(buf, BRF, LEVEL_IMMORT, TRUE);
+        account_index::clear();
+        account_index::set_enabled(false);
+        return;
+    }
+
+    if (g_unreadable_buckets_at_boot > 0) {
+        // One unreadable bucket is a fifth of the address space gone: the index is missing an unknown
+        // number of accounts, and each such bucket counts as a SINGLE quarantined record, so five of
+        // them (the whole letter range) does not even reach MAX_QUARANTINED_RECORDS_AT_BOOT. An
+        // authoritative index that is missing accounts answers "No account exists for that email
+        // address." for every one of them -- the string interpre.cpp matches to offer a new account.
+        // Fall back to scanning, which refuses with the real error instead, exactly as the
+        // whole-directory failure above does.
+        sprintf(buf, "Account index: %lu account bucket(s) could not be read. The index is NOT authoritative; account lookups fall back to scanning.",
+            static_cast<unsigned long>(g_unreadable_buckets_at_boot));
+        log(buf);
+        mudlog(buf, BRF, LEVEL_IMMORT, TRUE);
+        account_index::clear();
+        account_index::set_enabled(false);
+        return;
+    }
+
+    const std::size_t quarantined = account_index::quarantined_count();
+    if (quarantined > 0) {
+        sprintf(buf, "Account index: %lu record(s) quarantined; use the account index wizard command to list them.",
+            static_cast<unsigned long>(quarantined));
+        log(buf);
+        mudlog(buf, BRF, LEVEL_IMMORT, TRUE);
+    }
+
+    if (g_unreadable_character_files_at_boot > 0) {
+        // Not fatal and deliberately not counted against MAX_QUARANTINED_RECORDS_AT_BOOT: a bad
+        // character file is not the account's failure, and refusing the boot over one would lock
+        // its owner out of every other character they own. But it must not be silent -- each of
+        // these is a character that cannot be selected, and the player is told only that it does
+        // not exist.
+        sprintf(buf, "Account index: %lu account-native character file(s) could not be read and are NOT in the player index; see the per-character lines above.",
+            static_cast<unsigned long>(g_unreadable_character_files_at_boot));
+        log(buf);
+        mudlog(buf, BRF, LEVEL_IMMORT, TRUE);
+    }
+
+    if (quarantined > account_index::MAX_QUARANTINED_RECORDS_AT_BOOT) {
+        sprintf(buf, "Account index: %lu unusable account records exceeds the limit of %lu. Refusing to boot.",
+            static_cast<unsigned long>(quarantined),
+            static_cast<unsigned long>(account_index::MAX_QUARANTINED_RECORDS_AT_BOOT));
+        log(buf);
+        exit(1);
+    }
+
+    // size() counts quarantined records too -- they are indexed, and hold their address -- so name
+    // them here rather than letting the total read as "accounts that resolve".
+    sprintf(buf, "Account index: %lu record(s) indexed, %lu of them quarantined.",
+        static_cast<unsigned long>(account_index::size()),
+        static_cast<unsigned long>(account_index::quarantined_count()));
+    log(buf);
+}
 
 //  Reads a field from the player filename format (using FAT as index)
 
