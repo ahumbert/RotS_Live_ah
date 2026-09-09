@@ -295,9 +295,9 @@ void quarantine(const std::string& normalized_email, const std::string& record_p
     // for the two path-shaped cases (an unparsed or emailless legacy flat record, keyed by its own
     // record_path) the key is a case-sensitive filesystem path -- lowercasing it here previously
     // silently produced a key ("accounts/k-o/...") that never matched the record's real path
-    // ("accounts/K-O/...", bucket letters are always uppercase), which made `account index verify`
-    // report false drift for that quarantine shape even after both callers agreed on the same key
-    // rule.
+    // ("accounts/K-O/...", bucket letters are always uppercase), so the quarantine for that shape was
+    // filed under a key nothing could ever look it up by, even after both callers agreed on the same
+    // key rule.
     if (normalized_email.empty())
         return;
 

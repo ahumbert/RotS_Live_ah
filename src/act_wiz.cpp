@@ -3211,8 +3211,8 @@ ACMD(do_account)
 
         // Contested keys have to be listed here alongside the quarantined ones. A contested
         // character key makes save_char write NOTHING for that character -- silently, to the log
-        // only -- and `account index verify` reports agreement throughout, because the index and the
-        // disk agree perfectly about a genuine on-disk duplicate. Without this listing there is
+        // only -- and nothing else reports it, because the index and the disk agree perfectly about a
+        // genuine on-disk duplicate. Without this listing there is
         // nowhere in the game that shows the state at all.
         for (const account_index::ContestedKey& contested : account_index::contested_keys()) {
             std::string claimants;

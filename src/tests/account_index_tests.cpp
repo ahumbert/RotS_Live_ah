@@ -1036,8 +1036,8 @@ TEST_F(AccountIndexTest, QuarantineWithdrawsTheRecordsClaimsSoTheSurvivorResolve
 TEST_F(AccountIndexTest, ContestedKeysAreListedForTheWizardCommand)
 {
     // `account index` prints these. A contested character key silently stops that character's saves
-    // while `account index verify` reports agreement throughout (index and disk agree perfectly
-    // about a real on-disk duplicate), so this listing is the only place the state is visible.
+    // while nothing else reports it either (index and disk agree perfectly about a real on-disk
+    // duplicate), so this listing is the only place the state is visible.
     account_index::upsert(make_account("first@example.com", "shared", { "Bob" }),
         "accounts/A-E/first@example.com/account.json");
     account_index::upsert(make_account("second@example.com", "shared", { "Bob" }),
@@ -1191,8 +1191,8 @@ TEST_F(AccountIndexTest, TheRecordEnumeratorSkipsNonRegularJsonEntries)
     // it could not read -- which refuses EVERY new account. A dangling symlink is exactly that case
     // (stat() follows the link and gets ENOENT), and once the enumerator stopped visiting it, it was
     // no longer quarantined either, so neither escape hatch fired: registration was refused
-    // permanently, with nothing quarantined, nothing logged and `account index verify` reporting
-    // agreement. Pinning the enumerator's visit count alone does not see any of that.
+    // permanently, with nothing quarantined, nothing logged and `account index` showing 0
+    // quarantined. Pinning the enumerator's visit count alone does not see any of that.
     account::AccountData newcomer;
     std::string creation_error;
     EXPECT_TRUE(account::create_account_for_email(root, "newcomer@example.com", "ValidPass1",
@@ -1326,7 +1326,7 @@ TEST_F(AccountIndexTest, TheOwnerFastPathAnswersWithoutReadingTheRecordFile)
 // account_storage_contains_unreadable_records decides whether account creation is allowed at all.
 // Every disagreement between them produced the same outcome: a record the guard called unreadable
 // that nothing quarantined, so neither escape hatch fired and EVERY registration on the server was
-// refused, permanently, with nothing logged and `account index verify` reporting agreement.
+// refused, permanently, with nothing logged and `account index` showing 0 quarantined.
 //
 // These tests deliberately do NOT assert visit counts alone. Pinning the enumerator's count is what
 // let the last regression through: it never touched the sibling walker named in its own rationale.

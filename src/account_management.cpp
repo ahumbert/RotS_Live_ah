@@ -780,8 +780,8 @@ namespace {
     // account_storage_contains_unreadable_records decides whether account creation is allowed at
     // all. Every historical disagreement between them produced the same outcome: a record the guard
     // called unreadable that nothing quarantined, so neither of the guard's escape hatches fired and
-    // EVERY registration on the server was refused, permanently, with nothing logged, `account
-    // index` showing 0 quarantined, and `account index verify` reporting agreement.
+    // EVERY registration on the server was refused, permanently, with nothing logged and `account
+    // index` showing 0 quarantined.
     enum class BucketEntryKind {
         // Filesystem litter. Never visited by the enumerator (so it cannot count towards
         // MAX_QUARANTINED_RECORDS_AT_BOOT) and never a record the creation guard may refuse over.
@@ -1226,8 +1226,8 @@ namespace {
     // the key is the entry name, for a legacy flat file it is the file's own path -- and an unparsed
     // record discloses no email, so neither shape needs the record read. Takes the shared
     // classification so this and for_each_account_record_on_disk cannot key the same entry
-    // differently; keying it differently is how `account index verify` twice reported false drift
-    // for a record that was really right there on disk.
+    // differently; keying it differently is what twice put the index and the disk into disagreement
+    // over a record that was really right there.
     std::string account_index_key_for_unparsed_bucket_entry(const std::string& entry_name,
         const BucketEntryClassification& classification)
     {
