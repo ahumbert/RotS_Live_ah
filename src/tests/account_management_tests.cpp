@@ -4636,3 +4636,83 @@ TEST(AccountManagement, ARefusedWriteOverAnotherAccountsPathLeaksNoDescriptorEit
         EXPECT_FALSE(account::write_account_file(root, intruder, nullptr));
     EXPECT_EQ(count_open_descriptors(), before);
 }
+
+namespace {
+bool path_exists_for_test(const std::string& path)
+{
+    struct stat info { };
+    return stat(path.c_str(), &info) == 0;
+}
+} // namespace
+
+// --- Conversion loss guard -----------------------------------------------------------------------
+//
+// A legacy character converts to JSON exactly once and the legacy file is deleted immediately after.
+// If the conversion loses something, the original is already gone. These pin the guard that reads
+// the written file back and refuses before anything is retired.
+
+TEST(AccountManagement, RefusesAConversionWhoseWrittenFileCannotBeReadBack)
+{
+    // Not a contrived fault: skills are keyed by NAME in the character JSON and the skill table has
+    // duplicate names -- indices 125 and 126 are both "trash" (consts.cpp:587-588). A character with
+    // a value in both serializes to duplicate keys and will not parse back. Before the guard, the
+    // conversion "succeeded", the legacy file was deleted, and the character was left unloadable.
+    TemporaryDirectory temp_directory;
+    ASSERT_EQ(mkdir((temp_directory.path() + "/players").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/players/A-E").c_str(), 0700), 0);
+
+    char_file_u aragorn = make_stored_character("aragorn");
+    aragorn.skills[125] = 40;
+    aragorn.skills[126] = 60;
+    ASSERT_FALSE(write_valid_legacy_player_file(temp_directory.path(), aragorn).empty());
+    const std::string legacy_path = temp_directory.path() + "/players/A-E/aragorn";
+    ASSERT_TRUE(path_exists_for_test(legacy_path)) << legacy_path;
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(temp_directory.path(), "alpha-admin", "player@example.com",
+        "ValidPass1", 1700012222, nullptr, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_verify_email(temp_directory.path(), "alpha-admin", "VerifierAdmin",
+        1700012222, nullptr, &error_message)) << error_message;
+
+    account::AccountData linked_account;
+    account::CharacterMigrationData migration;
+    EXPECT_FALSE(account::link_and_migrate_character(temp_directory.path(), "alpha-admin",
+        "ValidPass1", "aragorn", 1700012223, &linked_account, &migration, &error_message));
+    EXPECT_NE(error_message.find("cannot be read back"), std::string::npos) << error_message;
+
+    // The whole point of refusing before retirement: the character is exactly as it was.
+    EXPECT_TRUE(path_exists_for_test(legacy_path)) << "the legacy file was retired despite the refusal";
+
+    // Nothing half-converted is left in the account directory.
+    EXPECT_FALSE(path_exists_for_test(temp_directory.path()
+        + "/accounts/P-T/player@example.com/aragorn.character.json"));
+
+    // And the account never claimed it, so the roster does not offer a character that cannot load.
+    account::AccountData account_data;
+    ASSERT_TRUE(account::read_account_file(temp_directory.path(), "alpha-admin", &account_data, &error_message))
+        << error_message;
+    EXPECT_FALSE(account::account_has_character(account_data, "aragorn"));
+}
+
+TEST(AccountManagement, StillConvertsACharacterThatSurvivesTheRoundTrip)
+{
+    // The guard must not refuse ordinary characters -- if it did, it would close the only route onto
+    // the account system.
+    TemporaryDirectory temp_directory;
+    ASSERT_EQ(mkdir((temp_directory.path() + "/players").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/players/A-E").c_str(), 0700), 0);
+    write_valid_legacy_player_file(temp_directory.path(), make_stored_character("aragorn"));
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(temp_directory.path(), "alpha-admin", "player@example.com",
+        "ValidPass1", 1700012222, nullptr, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_verify_email(temp_directory.path(), "alpha-admin", "VerifierAdmin",
+        1700012222, nullptr, &error_message)) << error_message;
+
+    account::AccountData linked_account;
+    account::CharacterMigrationData migration;
+    ASSERT_TRUE(account::link_and_migrate_character(temp_directory.path(), "alpha-admin",
+        "ValidPass1", "aragorn", 1700012223, &linked_account, &migration, &error_message))
+        << error_message;
+    EXPECT_TRUE(account::account_has_character(linked_account, "aragorn"));
+}

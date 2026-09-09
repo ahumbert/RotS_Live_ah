@@ -399,7 +399,7 @@ namespace {
         return write_account_object_json_file(root_directory, account_name, character_name, object_data, error_message);
     }
 
-    bool hydrate_account_native_character_file_from_migration(const std::string& root_directory, const std::string& account_name, const std::string& character_name, const CharacterMigrationData& snapshot_data, std::string* error_message)
+    bool hydrate_account_native_character_file_from_migration(const std::string& root_directory, const std::string& account_name, const std::string& character_name, const CharacterMigrationData& snapshot_data, std::string* error_message, char_file_u* converted_source)
     {
         std::string player_text;
         if (!decode_snapshot_content(snapshot_data.player_file, &player_text, error_message))
@@ -416,7 +416,16 @@ namespace {
             return false;
         }
 
-        return write_account_character_file(root_directory, account_name, stored_character, error_message);
+        if (!write_account_character_file(root_directory, account_name, stored_character, error_message))
+            return false;
+
+        // Handed back so the caller can verify the written file against it. Deliberately not
+        // verified in here: this is the one migration step whose failure path does not run
+        // cleanup_account_native_migration_outputs, safe only because its write is the last thing it
+        // does. A check after the write would leave the JSON behind on failure.
+        if (converted_source != nullptr)
+            *converted_source = stored_character;
+        return true;
     }
 
     bool write_account_exploits_json_file(const std::string& root_directory, const std::string& account_name, const std::string& character_name, const exploits_json::ExploitHistoryData& exploit_history, std::string* error_message)
@@ -546,6 +555,118 @@ namespace {
         std::remove(account_character_snapshot_path(root_directory, account_name, character_name).c_str());
     }
 
+    // --- Conversion loss guard --------------------------------------------------------------------
+    //
+    // A legacy character is converted to JSON exactly once, and the legacy file is deleted straight
+    // afterwards. If the conversion drops a field, the evidence is gone with it. So before anything
+    // is retired we read the file we just wrote back off disk and check it still describes the same
+    // character.
+    //
+    // Fields that legitimately do not survive, and are therefore not compared. This list is the
+    // whole value of the check -- everything on it is never verified again, so it stays short and
+    // every entry says why:
+    //
+    //   player_index  recomputed from player_table on load; the stored value means nothing.
+    //   pwd           accounts own authentication now; the character password is deliberately not
+    //                 written to character JSON.
+    //   host          last-logon host, not serialized. Accepted loss, not a fault.
+    //   prof          char_file_u::prof is an NPC field PCs carry vestigially -- nothing in the
+    //                 codebase writes it for a player character (only mob prototypes, the OLC, and
+    //                 load/save copying it through), so there is no maintained value to lose.
+    //
+    // Three more differ only when the SOURCE is zero, i.e. never set: apply_character_data_to_store
+    // substitutes a default for tactics, shooting and casting, and for each color slot's
+    // foreground/background mode. A
+    // zero there is "unset", so accepting the default is right -- but a CHANGE from one non-zero
+    // value to another is real loss and is still caught.
+    void neutralize_defaulted_on_unset(const char_file_u& source, char_file_u* comparable)
+    {
+        if (source.specials2.tactics == 0)
+            comparable->specials2.tactics = 0;
+        if (source.specials2.shooting == 0)
+            comparable->specials2.shooting = 0;
+        if (source.specials2.casting == 0)
+            comparable->specials2.casting = 0;
+        for (int slot = 0; slot < MAX_COLOR_FIELDS; ++slot) {
+            if (source.profs.color_settings[slot].foreground.mode == 0)
+                comparable->profs.color_settings[slot].foreground.mode = 0;
+            if (source.profs.color_settings[slot].background.mode == 0)
+                comparable->profs.color_settings[slot].background.mode = 0;
+        }
+    }
+
+    // Empty when the two describe the same character. Otherwise the name of the first field that
+    // does not match, so the failure says WHICH field rather than only that something changed.
+    std::string first_lossy_conversion_field(const char_file_u& source, const char_file_u& readback)
+    {
+        char_file_u expected = readback;
+        neutralize_defaulted_on_unset(source, &expected);
+
+#define FIELD_DIFFERS(f) (std::memcmp(&source.f, &expected.f, sizeof(source.f)) != 0)
+        if (source.sex != expected.sex) return "sex";
+        if (source.race != expected.race) return "race";
+        if (source.bodytype != expected.bodytype) return "bodytype";
+        if (source.level != expected.level) return "level";
+        if (source.language != expected.language) return "language";
+        if (source.birth != expected.birth) return "birth";
+        if (source.played != expected.played) return "played";
+        if (source.weight != expected.weight) return "weight";
+        if (source.height != expected.height) return "height";
+        if (source.hometown != expected.hometown) return "hometown";
+        if (source.last_logon != expected.last_logon) return "last_logon";
+        if (std::strncmp(source.name, expected.name, sizeof(source.name)) != 0) return "name";
+        if (std::strncmp(source.title, expected.title, sizeof(source.title)) != 0) return "title";
+        if (std::strncmp(source.description, expected.description, sizeof(source.description)) != 0) return "description";
+        if (FIELD_DIFFERS(talks)) return "talks";
+        if (FIELD_DIFFERS(tmpabilities)) return "tmpabilities";
+        if (FIELD_DIFFERS(constabilities)) return "constabilities";
+        if (FIELD_DIFFERS(points)) return "points";
+        if (FIELD_DIFFERS(skills)) return "skills";
+        if (FIELD_DIFFERS(affected)) return "affected";
+        if (FIELD_DIFFERS(specials2)) return "specials2";
+        if (FIELD_DIFFERS(profs)) return "profs";
+#undef FIELD_DIFFERS
+        return std::string();
+    }
+
+    // Reads back the character file just written and proves it still describes `source`. Runs once
+    // per character in its lifetime, at conversion, so the extra parse costs nothing that matters.
+    bool verify_converted_character_file(const std::string& root_directory, const std::string& account_name, const std::string& character_name, const char_file_u& source, std::string* error_message)
+    {
+        const std::string path = account_character_player_path(root_directory, account_name, character_name);
+
+        std::string json_text;
+        if (!read_text_file(path, &json_text, error_message)) {
+            set_error(error_message, "Converted character file '" + path + "' could not be read back for verification.");
+            return false;
+        }
+
+        character_json::CharacterData parsed;
+        std::string parse_error;
+        if (!character_json::deserialize_character_from_json(json_text, &parsed, &parse_error)) {
+            // The writer produced a file the reader refuses. Reachable today: skills are keyed by
+            // NAME and the skill table has duplicate names, so a character with values in two
+            // same-named slots serializes to duplicate keys and will not parse back.
+            set_error(error_message, "Converted character file for '" + character_name + "' cannot be read back: " + parse_error);
+            return false;
+        }
+
+        char_file_u readback {};
+        std::string apply_error;
+        if (!character_json::apply_character_data_to_store(parsed, &readback, &apply_error)) {
+            set_error(error_message, "Converted character file for '" + character_name + "' cannot be loaded back: " + apply_error);
+            return false;
+        }
+
+        const std::string lossy_field = first_lossy_conversion_field(source, readback);
+        if (!lossy_field.empty()) {
+            set_error(error_message, "Conversion of '" + character_name + "' would lose data: field '" + lossy_field + "' does not survive the round trip.");
+            return false;
+        }
+
+        return true;
+    }
+
     bool migrate_legacy_character_files_internal(const std::string& root_directory, const std::string& account_name, const std::string& character_name, const std::string& player_file_path, const std::string& stale_flat_player_file_path, const std::string& object_file_path, const std::string& exploits_file_path, long migrated_at, CharacterMigrationData* migration, std::string* error_message)
     {
         CharacterMigrationData snapshot_data;
@@ -559,8 +680,20 @@ namespace {
             return false;
         if (!read_file_bytes(exploits_file_path, false, &snapshot_data.exploits_file, error_message))
             return false;
-        if (!hydrate_account_native_character_file_from_migration(root_directory, account_name, character_name, snapshot_data, error_message))
+        char_file_u converted_source {};
+        if (!hydrate_account_native_character_file_from_migration(root_directory, account_name, character_name, snapshot_data, error_message, &converted_source))
             return false;
+
+        // Before ANY legacy file is retired. retire_legacy_character_files_after_migration below is
+        // what deletes the originals, so a refusal here leaves the character exactly as it was:
+        // legacy files intact, and admin_link_and_migrate_character never reaches
+        // add_character_to_account, so the account is not touched either. The player is told it
+        // failed and can convert later once the cause is fixed -- far better than a converted
+        // character that is quietly missing a field with the original already deleted.
+        if (!verify_converted_character_file(root_directory, account_name, character_name, converted_source, error_message)) {
+            cleanup_account_native_migration_outputs(root_directory, account_name, character_name);
+            return false;
+        }
         if (!hydrate_account_native_object_file_from_migration(root_directory, account_name, character_name, snapshot_data, error_message)) {
             cleanup_account_native_migration_outputs(root_directory, account_name, character_name);
             return false;
