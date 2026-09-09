@@ -950,6 +950,133 @@ bool admin_link_character(const std::string& root_directory, const std::string& 
     return true;
 }
 
+bool admin_rename_linked_character(const std::string& root_directory, const std::string& account_name, const std::string& character_name, const std::string& new_character_name, long updated_at, AccountData* account, std::string* error_message)
+{
+    if (!validate_identifier_for_path(account_name, "Account name", error_message))
+        return false;
+    if (!validate_identifier_for_path(character_name, "Character name", error_message))
+        return false;
+    if (!validate_identifier_for_path(new_character_name, "New character name", error_message))
+        return false;
+
+    const std::string normalized_character_name = normalize_account_name(character_name);
+    const std::string normalized_new_name = normalize_account_name(new_character_name);
+    if (normalized_character_name == normalized_new_name) {
+        set_error(error_message, "The new character name is the same as the old one.");
+        return false;
+    }
+
+    AccountData stored_account;
+    if (!read_account_file(root_directory, account_name, &stored_account, error_message))
+        return false;
+
+    if (!account_has_character(stored_account, normalized_character_name)) {
+        set_error(error_message, "Character is not linked to this account.");
+        return false;
+    }
+    if (account_has_character(stored_account, normalized_new_name)) {
+        set_error(error_message, "This account already has a character named '" + normalized_new_name + "'.");
+        return false;
+    }
+
+    if (!validate_account_owned_character_path(stored_account, normalized_character_name, error_message))
+        return false;
+    if (!validate_account_owned_object_path(stored_account, normalized_character_name, error_message))
+        return false;
+    if (!validate_account_owned_exploits_path(stored_account, normalized_character_name, error_message))
+        return false;
+
+    struct StagedMove {
+        std::string from;
+        std::string to;
+        const char* label = "";
+        bool moved = false;
+    };
+
+    std::vector<StagedMove> staged_moves = {
+        { resolved_character_path(stored_account, root_directory, normalized_character_name),
+            account_character_player_path(root_directory, stored_account.account_name, normalized_new_name),
+            "account character file", false },
+        { resolved_object_path(stored_account, root_directory, normalized_character_name),
+            account_character_object_path(root_directory, stored_account.account_name, normalized_new_name),
+            "account object file", false },
+        { resolved_exploits_path(stored_account, root_directory, normalized_character_name),
+            account_character_exploits_path(root_directory, stored_account.account_name, normalized_new_name),
+            "account exploits file", false }
+    };
+
+    // Refuse before moving anything if a destination is already occupied. account_has_character
+    // above catches the ordinary case; this catches a stray file left by an interrupted rename,
+    // which would otherwise be silently overwritten by std::rename.
+    for (const StagedMove& staged_move : staged_moves) {
+        struct stat file_info { };
+        if (stat(staged_move.to.c_str(), &file_info) == 0) {
+            set_error(error_message, std::string("Refusing to rename: a ") + staged_move.label + " already exists at '" + staged_move.to + "'.");
+            return false;
+        }
+    }
+
+    auto undo_staged_moves = [&]() {
+        for (auto it = staged_moves.rbegin(); it != staged_moves.rend(); ++it) {
+            if (!it->moved)
+                continue;
+            if (std::rename(it->to.c_str(), it->from.c_str()) != 0) {
+                std::fprintf(stderr, "SYSERR: Failed to undo staged account rename '%s' -> '%s': %s\n",
+                    it->from.c_str(), it->to.c_str(), std::strerror(errno));
+            }
+        }
+    };
+
+    for (StagedMove& staged_move : staged_moves) {
+        struct stat file_info { };
+        if (stat(staged_move.from.c_str(), &file_info) != 0) {
+            // A character can legitimately lack an object or exploits file; the character file
+            // itself is the one that must exist, and validate_account_owned_character_path has
+            // already vouched for its path.
+            if (errno == ENOENT)
+                continue;
+            set_error(error_message, std::string("Failed to inspect ") + staged_move.label + " '" + staged_move.from + "': " + std::strerror(errno));
+            undo_staged_moves();
+            return false;
+        }
+
+        if (std::rename(staged_move.from.c_str(), staged_move.to.c_str()) != 0) {
+            set_error(error_message, std::string("Failed to move ") + staged_move.label + " '" + staged_move.from + "' to '" + staged_move.to + "': " + std::strerror(errno));
+            undo_staged_moves();
+            return false;
+        }
+        staged_move.moved = true;
+    }
+
+    AccountData updated_account = stored_account;
+    for (std::string& listed_character : updated_account.characters) {
+        if (normalize_account_name(listed_character) == normalized_character_name)
+            listed_character = normalized_new_name;
+    }
+    for (AccountData::CharacterLinkReference& link : updated_account.character_links) {
+        if (normalize_account_name(link.character_name) != normalized_character_name)
+            continue;
+        link.character_name = normalized_new_name;
+        link.character_path = normalized_new_name + ".character.json";
+        link.object_path = normalized_new_name + ".objects.json";
+        link.exploits_path = normalized_new_name + ".exploits.json";
+    }
+    updated_account.updated_at = updated_at;
+
+    // The write is last, so a failure here leaves the account describing the state the files were
+    // just restored to rather than a state that never existed on disk.
+    if (!write_account_file(root_directory, updated_account, error_message)) {
+        undo_staged_moves();
+        return false;
+    }
+
+    if (account)
+        *account = updated_account;
+
+    set_error(error_message, "");
+    return true;
+}
+
 bool admin_link_and_migrate_character(const std::string& root_directory, const std::string& account_name, const std::string& character_name, long updated_at, AccountData* account, CharacterMigrationData* migration, std::string* error_message)
 {
     if (!validate_identifier_for_path(account_name, "Account name", error_message))

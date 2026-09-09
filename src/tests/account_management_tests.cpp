@@ -4374,3 +4374,133 @@ TEST(AccountManagement, AccountJsonWithoutRosterSortLoadsWithInsertionOrder)
     ASSERT_TRUE(account::roster_sort_from_string(parsed_account.roster_sort, &sort));
     EXPECT_EQ(sort, account::RosterSort::Account);
 }
+
+// --- admin_rename_linked_character -------------------------------------------------------------
+//
+// rename_char (db.cpp) predates account storage: it system("rm")s player_table[i].ch_file, which
+// for an account-native character IS the account's <name>.character.json, and never rewrites
+// account.json. The character's save is destroyed while the account keeps listing the old name,
+// leaving a roster row that renders "[ ?? ???]" and cannot be played. These cover the account-layer
+// half of the fix: move the three files and rewrite the account, atomically, or change nothing.
+
+namespace {
+
+// Writes the three account-owned files for a linked character, so a rename has something to move.
+void write_linked_character_files(const std::string& root, const std::string& account_name,
+    const std::string& character_name, const std::string& marker)
+{
+    const std::string character_path = account::account_character_player_path(root, account_name, character_name);
+    const std::string object_path = account::account_character_object_path(root, account_name, character_name);
+    const std::string exploits_path = account::account_character_exploits_path(root, account_name, character_name);
+    for (const auto& entry : { std::make_pair(character_path, marker + "-character"),
+             std::make_pair(object_path, marker + "-objects"),
+             std::make_pair(exploits_path, marker + "-exploits") }) {
+        FILE* file = std::fopen(entry.first.c_str(), "wb");
+        ASSERT_NE(file, nullptr) << "could not create " << entry.first;
+        std::fwrite(entry.second.data(), 1, entry.second.size(), file);
+        std::fclose(file);
+    }
+}
+
+bool path_is_present(const std::string& path)
+{
+    struct stat file_info { };
+    return stat(path.c_str(), &file_info) == 0;
+}
+
+std::string read_whole(const std::string& path)
+{
+    FILE* file = std::fopen(path.c_str(), "rb");
+    if (file == nullptr)
+        return std::string();
+    std::string out;
+    char buffer[512];
+    while (true) {
+        const size_t n = std::fread(buffer, 1, sizeof(buffer), file);
+        if (n > 0)
+            out.append(buffer, n);
+        if (n < sizeof(buffer))
+            break;
+    }
+    std::fclose(file);
+    return out;
+}
+
+} // namespace
+
+TEST(AccountManagement, RenamingALinkedCharacterMovesItsFilesAndRewritesTheAccount)
+{
+    TemporaryDirectory temp_directory;
+    account::AccountData account_data;
+    std::string error_message;
+
+    ASSERT_TRUE(account::create_account_for_email(temp_directory.path(), "player@example.com",
+        "ValidPass1", 1700006000, &account_data, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_link_character(temp_directory.path(), account_data.account_name,
+        "oldname", 1700006001, &account_data, &error_message)) << error_message;
+    write_linked_character_files(temp_directory.path(), account_data.account_name, "oldname", "payload");
+
+    ASSERT_TRUE(account::admin_rename_linked_character(temp_directory.path(),
+        account_data.account_name, "oldname", "newname", 1700006002, &account_data, &error_message))
+        << error_message;
+
+    const std::string old_character = account::account_character_player_path(temp_directory.path(), account_data.account_name, "oldname");
+    const std::string new_character = account::account_character_player_path(temp_directory.path(), account_data.account_name, "newname");
+    const std::string new_object = account::account_character_object_path(temp_directory.path(), account_data.account_name, "newname");
+    const std::string new_exploits = account::account_character_exploits_path(temp_directory.path(), account_data.account_name, "newname");
+
+    EXPECT_FALSE(path_is_present(old_character)) << "the old character file must not survive the rename";
+    EXPECT_TRUE(path_is_present(new_character)) << "the character file must exist under the new name";
+    EXPECT_TRUE(path_is_present(new_object));
+    EXPECT_TRUE(path_is_present(new_exploits));
+    // The CONTENT must move, not just the name -- this is the whole point.
+    EXPECT_EQ(read_whole(new_character), "payload-character");
+    EXPECT_EQ(read_whole(new_object), "payload-objects");
+    EXPECT_EQ(read_whole(new_exploits), "payload-exploits");
+
+    account::AccountData reread;
+    ASSERT_TRUE(account::read_account_file(temp_directory.path(), account_data.account_name, &reread, &error_message)) << error_message;
+    EXPECT_FALSE(account::account_has_character(reread, "oldname")) << "the account must stop listing the old name";
+    EXPECT_TRUE(account::account_has_character(reread, "newname")) << "the account must list the new name";
+}
+
+TEST(AccountManagement, RenamingALinkedCharacterOntoAnExistingNameChangesNothing)
+{
+    TemporaryDirectory temp_directory;
+    account::AccountData account_data;
+    std::string error_message;
+
+    ASSERT_TRUE(account::create_account_for_email(temp_directory.path(), "player@example.com",
+        "ValidPass1", 1700006100, &account_data, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_link_character(temp_directory.path(), account_data.account_name,
+        "oldname", 1700006101, &account_data, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_link_character(temp_directory.path(), account_data.account_name,
+        "taken", 1700006102, &account_data, &error_message)) << error_message;
+    write_linked_character_files(temp_directory.path(), account_data.account_name, "oldname", "first");
+    write_linked_character_files(temp_directory.path(), account_data.account_name, "taken", "second");
+
+    EXPECT_FALSE(account::admin_rename_linked_character(temp_directory.path(),
+        account_data.account_name, "oldname", "taken", 1700006103, &account_data, &error_message));
+
+    // Neither character may be disturbed by the refusal.
+    EXPECT_EQ(read_whole(account::account_character_player_path(temp_directory.path(), account_data.account_name, "oldname")), "first-character");
+    EXPECT_EQ(read_whole(account::account_character_player_path(temp_directory.path(), account_data.account_name, "taken")), "second-character");
+    account::AccountData reread;
+    ASSERT_TRUE(account::read_account_file(temp_directory.path(), account_data.account_name, &reread, &error_message)) << error_message;
+    EXPECT_TRUE(account::account_has_character(reread, "oldname"));
+    EXPECT_TRUE(account::account_has_character(reread, "taken"));
+}
+
+TEST(AccountManagement, RenamingACharacterTheAccountDoesNotOwnIsRefused)
+{
+    TemporaryDirectory temp_directory;
+    account::AccountData account_data;
+    std::string error_message;
+
+    ASSERT_TRUE(account::create_account_for_email(temp_directory.path(), "player@example.com",
+        "ValidPass1", 1700006200, &account_data, &error_message)) << error_message;
+
+    EXPECT_FALSE(account::admin_rename_linked_character(temp_directory.path(),
+        account_data.account_name, "stranger", "newname", 1700006201, &account_data, &error_message));
+    EXPECT_NE(error_message.find("not linked"), std::string::npos) << error_message;
+}
