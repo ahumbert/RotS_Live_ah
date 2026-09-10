@@ -162,6 +162,12 @@ struct ContestedKey {
 // Every contested key, sorted by kind then key so the wizard listing is stable between calls.
 std::vector<ContestedKey> contested_keys();
 
+// True when two records on disk claim this address. Distinct from is_quarantined and from a plain
+// find_path_by_email miss: the address is held, and held by MORE than one record, so it is TAKEN.
+// find_path_by_email refuses for a contested address the same way it refuses for an absent one, so
+// a caller asking "is this address free" cannot tell the two apart without this.
+bool is_contested_email(const std::string& email);
+
 bool is_quarantined(const std::string& email);
 
 // Exact-key quarantine lookup: takes the key a record is filed under (account_index_quarantine_key's

@@ -441,6 +441,11 @@ bool find_email_by_account_name(const std::string& account_name, std::string* em
     return true;
 }
 
+bool is_contested_email(const std::string& email)
+{
+    return g_contested_emails.count(account::normalize_email(email)) != 0;
+}
+
 bool is_quarantined(const std::string& email)
 {
     return is_quarantined_record_key(account::normalize_email(email));

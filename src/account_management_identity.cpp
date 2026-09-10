@@ -478,7 +478,13 @@ bool create_account(const std::string& root_directory, const std::string& accoun
     // DIRECTORY path, and a legacy flat record has nothing there.
     if (account_index_is_authoritative_for(root_directory)) {
         std::string occupied_path;
-        if (account_index::find_path_by_email(email, &occupied_path, nullptr)) {
+        // is_contested_email as well as the lookup: find_path_by_email refuses a DISPUTED address
+        // exactly the way it refuses an absent one, so the lookup alone reads two records fighting
+        // over an address as nobody holding it. find_account_by_email_internal below refuses for
+        // the same reason and its caller only asks whether one was FOUND, so without this a third
+        // record gets written at an address that already has two.
+        if (account_index::find_path_by_email(email, &occupied_path, nullptr)
+            || account_index::is_contested_email(email)) {
             set_error(error_message, "An account already exists for that email address.");
             return false;
         }
@@ -551,7 +557,13 @@ bool create_account_for_email(const std::string& root_directory, const std::stri
     // DIRECTORY path, and a legacy flat record has nothing there.
     if (account_index_is_authoritative_for(root_directory)) {
         std::string occupied_path;
-        if (account_index::find_path_by_email(email, &occupied_path, nullptr)) {
+        // is_contested_email as well as the lookup: find_path_by_email refuses a DISPUTED address
+        // exactly the way it refuses an absent one, so the lookup alone reads two records fighting
+        // over an address as nobody holding it. find_account_by_email_internal below refuses for
+        // the same reason and its caller only asks whether one was FOUND, so without this a third
+        // record gets written at an address that already has two.
+        if (account_index::find_path_by_email(email, &occupied_path, nullptr)
+            || account_index::is_contested_email(email)) {
             set_error(error_message, "An account already exists for that email address.");
             return false;
         }
@@ -1127,15 +1139,22 @@ bool admin_rename_linked_character(const std::string& root_directory, const std:
         bool moved = false;
     };
 
+    // Both ends of every move come from the SAME derivation of the account's directory: the record
+    // already in hand, via resolved_*_path -> account_record_directory, which reads
+    // stored_account.normalized_email directly. Composing the destinations from the account NAME
+    // instead would round-trip through resolve_account_storage_key, and one function holding two
+    // independent derivations of one directory is the bug this branch has already had to fix twice
+    // over in the quarantine key. For the new name there is no character link yet, so the object
+    // and exploits forms fall through to their default file names -- which is what is wanted.
     std::vector<StagedMove> staged_moves = {
         { resolved_character_path(stored_account, root_directory, normalized_character_name),
-            account_character_player_path(root_directory, stored_account.account_name, normalized_new_name),
+            resolved_character_path(stored_account, root_directory, normalized_new_name),
             "account character file", false },
         { resolved_object_path(stored_account, root_directory, normalized_character_name),
-            account_character_object_path(root_directory, stored_account.account_name, normalized_new_name),
+            resolved_object_path(stored_account, root_directory, normalized_new_name),
             "account object file", false },
         { resolved_exploits_path(stored_account, root_directory, normalized_character_name),
-            account_character_exploits_path(root_directory, stored_account.account_name, normalized_new_name),
+            resolved_exploits_path(stored_account, root_directory, normalized_new_name),
             "account exploits file", false }
     };
 

@@ -1887,3 +1887,40 @@ TEST(AccountIndexUpsert, WithdrawsAStrandedAccountNameOnceTheDisputeSettles)
 
     account_index::clear();
 }
+
+TEST_F(AccountIndexTest, ADisputedEmailAddressIsTakenAndRefusesAccountCreation)
+{
+    // find_path_by_email refuses a CONTESTED address with its own message, and the creation guard
+    // read that refusal as "the address is free" -- the opposite of what its own comment claims
+    // ("an address the index already holds is TAKEN, whether or not its record still reads"). A
+    // disputed address is held by two records, not none. find_account_by_email_internal below
+    // refuses for the same reason and its caller tests only whether one was FOUND, so creation went
+    // on to write a third record at an address two records were already fighting over.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    ASSERT_EQ(mkdir((root + "/accounts").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((root + "/accounts/A-E").c_str(), 0700), 0);
+
+    account_index::set_root_directory(root);
+    account_index::set_enabled(true);
+
+    // Two records, two paths, two account names, one address: the shape upsert files as contested.
+    account_index::upsert(make_account("bob@example.com", "bob", {}),
+        root + "/accounts/A-E/bob@example.com/account.json");
+    account_index::upsert(make_account("bob@example.com", "bob-restored", {}),
+        root + "/accounts/A-E/bob-restored.json");
+    ASSERT_FALSE(account_index::find_path_by_email("bob@example.com", nullptr, nullptr))
+        << "the fixture is only meaningful if the address really is disputed";
+
+    account::AccountData created;
+    std::string error_message;
+    const bool creation_succeeded = account::create_account_for_email(root, "bob@example.com",
+        "ValidPass1", 1700000001, &created, &error_message);
+
+    account_index::set_enabled(false);
+
+    EXPECT_FALSE(creation_succeeded) << "a disputed address must not accept a third record";
+    EXPECT_EQ(error_message, "An account already exists for that email address.");
+}
