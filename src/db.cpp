@@ -859,7 +859,12 @@ void build_account_native_player_index(void)
             static_cast<unsigned long>(g_unreadable_buckets_at_boot));
         log(buf);
         mudlog(buf, BRF, LEVEL_IMMORT, TRUE);
-        account_index::clear();
+        // Disabled for LOOKUPS, but deliberately NOT cleared. The quarantine entries record which
+        // buckets could not be read, and that is exactly what the creation guard and the per-address
+        // reservation consult to refuse the addresses inside them while letting every other address
+        // through. Clearing here threw that away at the only moment it mattered, which turned one
+        // bucket with a bad mode into a server-wide refusal of all account creation. The whole-tree
+        // failure above still clears, because nothing was read there at all.
         account_index::set_enabled(false);
         return;
     }

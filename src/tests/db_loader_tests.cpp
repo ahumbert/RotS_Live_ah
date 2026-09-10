@@ -964,7 +964,9 @@ TEST(DbLoader, BuildPlayerIndexFailsClosedWhenAccountNativePathDoesNotFitPlayerI
     ASSERT_EQ(mkdir("accounts/A-E", 0700), 0);
 
     const char* account_name = "abcdefghijklmnopqrst";
-    const char* long_email = "abcdefghijklmnopqrst123456789012345678901234567890@example.com";
+    // Derived from the buffer, not hardcoded: ch_file was widened once already, and a fixture that
+    // silently stops exceeding it turns this into a test of nothing.
+    const std::string long_email = std::string(sizeof(player_table[0].ch_file), 'a') + "@example.com";
     std::string error_message;
     ASSERT_TRUE(account::create_account(".", account_name, long_email, "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
     ASSERT_TRUE(account::admin_link_character(".", account_name, "aragorn", 1700010102, nullptr, &error_message)) << error_message;
@@ -2122,7 +2124,11 @@ TEST(DbLoader, RefusesARenameWhoseAccountNativePathWouldNotFitThePlayerIndex)
     ASSERT_EQ(mkdir("players/A-E", 0700), 0);
 
     std::string error_message;
-    ASSERT_TRUE(account::create_account(".", "long-account", "firstname.lastname@somecompanyname.com", "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
+    // Sized so the OLD path still fits ch_file and the NEW one does not -- that is the whole
+    // scenario. Path is 31 bytes of structure + email + name, "aragorn" is 7 and "bartholomew" 11,
+    // so an email of (buffer - 40) puts the two either side of the limit at any buffer width.
+    const std::string long_email = std::string(sizeof(player_table[0].ch_file) - 40 - 12, 'f') + "@example.com";
+    ASSERT_TRUE(account::create_account(".", "long-account", long_email, "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
     ASSERT_TRUE(account::admin_link_character(".", "long-account", "aragorn", 1700010102, nullptr, &error_message)) << error_message;
 
     char_file_u stored_character = make_stored_character("aragorn");
@@ -2203,4 +2209,25 @@ TEST(DbLoader, ANewRoomStartsInitializedRatherThanWithWhateverWasOnTheHeap)
     EXPECT_EQ(room->bfs_next, nullptr);
     for (int direction = 0; direction < NUM_OF_DIRS; ++direction)
         EXPECT_EQ(room->dir_option[direction], nullptr) << "direction " << direction;
+}
+
+TEST(DbLoader, ThePlayerIndexHoldsTheAccountNativePathOfAnOrdinaryEmailAddress)
+{
+    // The account-native path is 31 bytes of fixed structure plus the email plus the character
+    // name. With MAX_NAME_LENGTH at 12 and ch_file at 80, that leaves 36 characters for an email
+    // address -- and nothing anywhere caps email length. Worse, the conversion path writes the
+    // files and links the character with NO length check, so the failure does not surface then: it
+    // surfaces at the next boot, in populate_player_index_entry_from_store, as exit(1). A player
+    // with an ordinary address converting a character stops the server starting.
+    ScopedPlayerTableEntry player_table_entry("aragorn");
+
+    char_file_u stored_character = make_stored_character("aragorn");
+    const std::string ordinary_path = "./accounts/A-E/alexandra.richardson@student.university.edu/aragorn.character.json";
+    ASSERT_GT(ordinary_path.size(), 80u) << "this fixture only means anything if it exceeded the old limit";
+
+    std::string error_message;
+    EXPECT_TRUE(update_player_index_entry_from_store(&stored_character, ordinary_path.c_str(), &error_message))
+        << error_message;
+    EXPECT_STREQ(player_table[stored_character.player_index].ch_file, ordinary_path.c_str())
+        << "the path must be held whole -- a truncated one loses the .character.json suffix save_char tests for";
 }

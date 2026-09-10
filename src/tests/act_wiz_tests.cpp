@@ -999,9 +999,12 @@ TEST(ActWiz, WizsetNameReportsARefusedRenameRatherThanClaimingSuccess)
     ScopedPlayerTableEntry player_table_entry("aragorn");
 
     descriptor_data descriptor = make_descriptor();
-    // Long enough that "./accounts/F-J/<email>/bartholomew.character.json" does not fit ch_file.
+    // Sized so "aragorn"'s path still fits ch_file and "bartholomew"'s does not: 31 bytes of fixed
+    // structure + email + name, with the two names 4 apart. Derived from the buffer so a future
+    // widening cannot quietly turn this into a test of nothing.
+    const std::string long_email = std::string(sizeof(player_table[0].ch_file) - 40 - 12, 'f') + "@example.com";
     char_data* implementor = make_account_native_implementor(&descriptor, "long-account",
-        "firstname.lastname@somecompanyname.com", "F-J");
+        long_email.c_str(), "F-J");
 
     char command[] = "player aragorn name Bartholomew";
     do_wizset(implementor, command, nullptr, 0, 0);

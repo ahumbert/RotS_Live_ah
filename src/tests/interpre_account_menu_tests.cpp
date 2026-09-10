@@ -4594,7 +4594,9 @@ TEST(InterpreAccountMenu, IntroduceCharRejectsTooLongAccountNativeIndexPathWitho
     ScopedMotdOverride motd_override(test_motd);
 
     const char* account_name = "abcdefghijklmnopqrst";
-    const char* long_email = "abcdefghijklmnopqrst123456789012345678901234567890@example.com";
+    // Derived from the buffer rather than hardcoded: ch_file has been widened once, and a fixture
+    // that quietly stops exceeding it turns this into a test of nothing.
+    const std::string long_email = std::string(sizeof(player_table[0].ch_file), 'a') + "@example.com";
     std::string error_message;
     ASSERT_TRUE(account::create_account(".", account_name, long_email, "ValidPass1", 1700010200, nullptr, &error_message)) << error_message;
     const std::string account_character_path = account::account_character_player_path(".", account_name, "aragorn");
@@ -4653,7 +4655,9 @@ TEST(InterpreAccountMenu, AccountSelectionRejectsTooLongAccountNativeIndexPathWi
     ASSERT_EQ(mkdir("accounts/A-E", 0700), 0);
 
     const char* account_name = "abcdefghijklmnopqrst";
-    const char* long_email = "abcdefghijklmnopqrst123456789012345678901234567890@example.com";
+    // Derived from the buffer rather than hardcoded: ch_file has been widened once, and a fixture
+    // that quietly stops exceeding it turns this into a test of nothing.
+    const std::string long_email = std::string(sizeof(player_table[0].ch_file), 'a') + "@example.com";
     std::string error_message;
     account::AccountData account_data;
     ASSERT_TRUE(account::create_account(".", account_name, long_email, "ValidPass1", 1700010200, &account_data, &error_message)) << error_message;
@@ -4671,7 +4675,7 @@ TEST(InterpreAccountMenu, AccountSelectionRejectsTooLongAccountNativeIndexPathWi
     descriptor_data descriptor = make_descriptor();
     descriptor.connected = CON_ACCTSLCT;
     std::snprintf(descriptor.account_name, sizeof(descriptor.account_name), "%s", account_name);
-    std::snprintf(descriptor.account_email, sizeof(descriptor.account_email), "%s", long_email);
+    std::snprintf(descriptor.account_email, sizeof(descriptor.account_email), "%s", long_email.c_str());
 
     char selection[] = "1";
     nanny(&descriptor, selection);

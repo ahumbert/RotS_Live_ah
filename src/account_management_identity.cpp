@@ -490,8 +490,11 @@ bool create_account(const std::string& root_directory, const std::string& accoun
         }
     }
 
-    if (account_index_is_authoritative_for(root_directory)
-        && (account_index::is_quarantined(email) || email_bucket_is_quarantined(root_directory, email))) {
+    // NOT gated on the index being authoritative. Boot switches the index off for LOOKUPS the moment
+    // a bucket cannot be read -- which is precisely when these reservations matter most, because the
+    // scan that replaces it cannot see into that bucket either. What boot could not read stays
+    // recorded regardless of whether the index is answering queries.
+    if (account_index::is_quarantined(email) || email_bucket_is_quarantined(root_directory, email)) {
         set_error(error_message, "That email address cannot be used right now.");
         return false;
     }
@@ -569,8 +572,11 @@ bool create_account_for_email(const std::string& root_directory, const std::stri
         }
     }
 
-    if (account_index_is_authoritative_for(root_directory)
-        && (account_index::is_quarantined(email) || email_bucket_is_quarantined(root_directory, email))) {
+    // NOT gated on the index being authoritative. Boot switches the index off for LOOKUPS the moment
+    // a bucket cannot be read -- which is precisely when these reservations matter most, because the
+    // scan that replaces it cannot see into that bucket either. What boot could not read stays
+    // recorded regardless of whether the index is answering queries.
+    if (account_index::is_quarantined(email) || email_bucket_is_quarantined(root_directory, email)) {
         set_error(error_message, "That email address cannot be used right now.");
         return false;
     }

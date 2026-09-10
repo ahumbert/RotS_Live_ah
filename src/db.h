@@ -205,7 +205,13 @@ struct player_index_element {
     int warpoints;
     int rank;
     int totalrank;
-    char ch_file[80]; /* for speed in locating the file to load */
+    // 31 bytes of fixed structure ("./accounts/<bucket>/" + "/" + ".character.json") plus the
+    // email plus the character name. At 80 that left 36 bytes for an email address, and
+    // nothing caps email length -- so an ordinary address made the conversion write files whose
+    // path the index could not hold, and the NEXT boot exit(1)'d. This struct is built fresh at
+    // boot and never serialized, so the width is free to choose; 160 leaves 117 for email plus
+    // name, past any real address, at ~80 bytes more per character in memory.
+    char ch_file[160]; /* for speed in locating the file to load */
 };
 
 struct help_index_element {

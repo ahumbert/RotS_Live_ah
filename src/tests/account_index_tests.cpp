@@ -2060,3 +2060,50 @@ TEST_F(AccountIndexTest, RegisteringDoesNotOverwriteARecordThatAppearedAfterBoot
     EXPECT_EQ(read_whole_file(record_path), original_bytes)
         << "the restored record must survive -- its password hash and character list are in it";
 }
+
+TEST_F(AccountIndexTest, AnUnreadableBucketRefusesOnlyTheAddressesThatWouldLiveInIt)
+{
+    // The escape hatch in account_storage_contains_unreadable_records is &&-gated on the index being
+    // authoritative -- but the one condition that creates its quarantine key, an unreadable bucket,
+    // is also what makes build_account_native_player_index clear() the index and disable it. So the
+    // hatch is dead exactly when it is needed, email_bucket_is_quarantined is skipped for the same
+    // reason, and the walk falls through to refusing EVERY account creation on the server with a raw
+    // errno string until an operator notices the directory mode.
+    //
+    // The design is per-address and correct: quarantine reserves the unreadable bucket, the
+    // per-address guard refuses addresses in it, and everything else carries on. Only the wiring
+    // was broken.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    ASSERT_EQ(mkdir((root + "/accounts").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((root + "/accounts/A-E").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((root + "/accounts/P-T").c_str(), 0700), 0);
+    ASSERT_EQ(chmod((root + "/accounts/P-T").c_str(), 0000), 0);
+
+    account_index::clear();
+    account_index::set_root_directory(root);
+    account_index::set_enabled(true);
+    account_index::quarantine(root + "/accounts/P-T", root + "/accounts/P-T",
+        "Failed to open account bucket directory");
+    // What the boot walk does once a bucket could not be read: stop trusting the index for lookups.
+    account_index::set_enabled(false);
+
+    account::AccountData created;
+    std::string elsewhere_error;
+    const bool elsewhere = account::create_account_for_email(root, "bob@example.com",
+        "ValidPass1", 1700000001, &created, &elsewhere_error);
+
+    std::string inside_error;
+    const bool inside_the_bucket = account::create_account_for_email(root, "peter@example.com",
+        "ValidPass1", 1700000002, &created, &inside_error);
+
+    chmod((root + "/accounts/P-T").c_str(), 0700);
+    account_index::clear();
+
+    EXPECT_TRUE(elsewhere)
+        << "one unreadable bucket must not refuse registration for the whole server: " << elsewhere_error;
+    EXPECT_FALSE(inside_the_bucket)
+        << "but an address that would live in that bucket cannot be proven free, so it must be refused";
+}

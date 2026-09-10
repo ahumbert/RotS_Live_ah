@@ -1317,7 +1317,6 @@ namespace {
         // kept because they are the correct behaviour for any caller that runs this scan with the
         // index on, and because deleting them would make re-adding such a caller silently refuse
         // every registration -- which is the exact bug this wave is fixing.
-        const bool index_is_authority = account_index_is_authoritative_for(root_directory);
 
         const std::string accounts_directory = root_directory + "/accounts";
         DIR* accounts_dir = opendir(accounts_directory.c_str());
@@ -1344,8 +1343,15 @@ namespace {
 
             DIR* bucket_dir = opendir(bucket_path.c_str());
             if (bucket_dir == nullptr) {
-                if (index_is_authority
-                    && account_index::is_quarantined_record_key(account_index_key_for_unreadable_bucket(bucket_path)))
+                // Deliberately NOT gated on index_is_authority. The one condition that files this
+                // quarantine key -- a bucket boot could not open -- is also the condition that makes
+                // build_account_native_player_index stop trusting the index for lookups, so gating
+                // the hatch on authority made it dead exactly when it was needed and refused every
+                // account creation on the server. The quarantine set is a record of what boot could
+                // not read; it is not a lookup path, and it stays valid whether or not the index is
+                // answering queries. The address that would live in this bucket is refused
+                // separately, by email_bucket_is_quarantined.
+                if (account_index::is_quarantined_record_key(account_index_key_for_unreadable_bucket(bucket_path)))
                     continue;
 
                 closedir(accounts_dir);
@@ -1364,8 +1370,9 @@ namespace {
                         continue;
                 }
 
-                if (index_is_authority
-                    && account_index::is_quarantined_record_key(
+                // Same reasoning as the bucket hatch above: a record boot already quarantined is one
+                // the game deliberately chose to run with, and its address is reserved.
+                if (account_index::is_quarantined_record_key(
                         account_index_key_for_unparsed_bucket_entry(account_entry->d_name, classification)))
                     continue;
 
