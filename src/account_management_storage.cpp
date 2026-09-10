@@ -254,6 +254,38 @@ bool write_account_file(const std::string& root_directory, const AccountData& ac
         }
     }
 
+    // Nothing this function DELETES may go unread first. The two retirement steps after the commit
+    // std::remove() these paths outright, and legacy_flat_path is composed from the ACCOUNT NAME --
+    // which a fresh registration derives from the email, so "bob@example.com" derives "bob" and
+    // lands exactly on an existing accounts/<bucket>/bob.json. An unparseable record there is
+    // quarantined under its own PATH (it has disclosed no email to be keyed by), so the
+    // email-keyed creation guards all miss and registration walks straight into deleting a real
+    // player's only copy. A record the server cannot read is precisely the one whose contents it
+    // must not assume; refuse the write instead, before anything is committed.
+    const auto refuses_retirement_target = [&](const std::string& path) -> bool {
+        if (path == final_path || !path_exists(path))
+            return false;
+
+        AccountData existing_record;
+        std::string existing_error;
+        if (!read_account_file_from_path(path, &existing_record, &existing_error)) {
+            set_error(error_message, "Existing account file could not be read safely.");
+            return true;
+        }
+
+        if (normalize_account_name(existing_record.account_name) != normalized_account.account_name) {
+            set_error(error_message, "Account storage path is already occupied by a different account.");
+            return true;
+        }
+
+        return false;
+    };
+
+    if (refuses_retirement_target(legacy_flat_path))
+        return false;
+    if (found_existing_account_path && refuses_retirement_target(existing_account_path))
+        return false;
+
     FILE* file = open_secure_output_file(temp_path, error_message);
     if (file == nullptr)
         return false;

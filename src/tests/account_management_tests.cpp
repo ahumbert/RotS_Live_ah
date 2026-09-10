@@ -1973,29 +1973,67 @@ TEST(AccountManagement, KeepsTheIndexCurrentWhenRetiringALegacyAccountFileFails)
     account::AccountData account_data;
     ASSERT_TRUE(account::create_account(root, "alpha-admin", "player@example.com", "ValidPass1", 1700007776, &account_data, &error_message)) << error_message;
 
-    // A non-empty directory where the legacy flat record would be: std::remove fails with ENOTEMPTY,
-    // which needs no permission games and so behaves the same whatever uid the tests run as.
+    // A legacy flat record that IS readable and IS this account's -- so the pre-commit guard on
+    // retirement targets passes it -- but which cannot be unlinked, because its bucket has lost the
+    // write bit. std::remove fails EACCES after the commit. (A record the guard can REJECT up front
+    // is the separate case below; this one has to reach the post-commit bailout to be worth
+    // anything.) The temp file and the rename both land inside the account's own email directory,
+    // which stays writable, so only the retirement is affected.
     const std::string legacy_bucket = root + "/accounts/" + account::account_bucket_for_name("alpha-admin");
     const std::string legacy_flat_path = legacy_bucket + "/alpha-admin.json";
     mkdir(legacy_bucket.c_str(), 0700);
-    ASSERT_EQ(mkdir(legacy_flat_path.c_str(), 0700), 0);
-    write_text_file(legacy_flat_path + "/occupant", "keeps the directory non-empty");
+    write_text_file(legacy_flat_path,
+        read_file_contents(root + "/accounts/" + account::account_bucket_for_name("player@example.com") + "/player@example.com/account.json"));
+    ASSERT_EQ(chmod(legacy_bucket.c_str(), 0500), 0);
 
     account_index::clear();
     account_index::set_root_directory(root);
     account_index::set_enabled(true);
 
-    EXPECT_FALSE(account::write_account_file(root, account_data, &error_message))
-        << "a failed retirement must still be reported";
+    const bool write_reported_failure = !account::write_account_file(root, account_data, &error_message);
 
     std::string indexed_path;
     const bool index_knows_the_record = account_index::find_path_by_email("player@example.com", &indexed_path, nullptr);
 
+    chmod(legacy_bucket.c_str(), 0700);
     account_index::set_enabled(false);
     account_index::clear();
 
+    EXPECT_TRUE(write_reported_failure) << "a failed retirement must still be reported";
     EXPECT_TRUE(index_knows_the_record)
         << "account.json is on disk after the rename, so the index must reflect it even though retirement failed";
+}
+
+TEST(AccountManagement, RefusesToWriteWhenALegacyRecordItWouldRetireCannotBeRead)
+{
+    // legacy_flat_path is composed from the ACCOUNT NAME, and a fresh registration derives that name
+    // from the email -- so "bob@example.com" derives "bob" and lands exactly on an existing
+    // accounts/<bucket>/bob.json. An unparseable record there is quarantined under its own PATH (it
+    // has disclosed no email to be keyed by), so every email-keyed creation guard misses and the
+    // write used to reach its retirement step and std::remove a real player's only copy. Nothing
+    // this function deletes may go unread first.
+    TemporaryDirectory temp_directory;
+    const std::string root = temp_directory.path();
+    std::string error_message;
+
+    ASSERT_EQ(mkdir((root + "/accounts").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((root + "/accounts/A-E").c_str(), 0700), 0);
+
+    const std::string legacy_flat_path = root + "/accounts/A-E/bob.json";
+    const std::string original_bytes = "{ \"account_name\": \"bob\", this record no longer parses";
+    write_text_file(legacy_flat_path, original_bytes);
+
+    account::AccountData account_data;
+    account_data.account_name = "bob";
+    account_data.normalized_email = "bob@example.com";
+    account_data.password_hash = "hash";
+    account_data.password_salt = "salt";
+
+    EXPECT_FALSE(account::write_account_file(root, account_data, &error_message))
+        << "a record that cannot be read must not be retired";
+    EXPECT_EQ(error_message, "Existing account file could not be read safely.");
+    EXPECT_EQ(read_file_contents(legacy_flat_path), original_bytes)
+        << "the unreadable record is the only copy, and must survive untouched";
 }
 
 TEST(AccountManagement, RefusesRegistrationWhoseEmailLivesInsideAnUnreadableAccountBucket)

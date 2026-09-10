@@ -1128,8 +1128,38 @@ namespace {
         // was not built against.
         if (account_index::is_enabled() && account_index::matches_root(root_directory)) {
             std::string indexed_path;
-            if (!account_index::find_path_by_email(email, &indexed_path, error_message))
-                return false;
+            if (!account_index::find_path_by_email(email, &indexed_path, error_message)) {
+                // A record can APPEAR after boot. lib/accounts is in no backup of its own, so a
+                // hand restore while the game is up is the normal way it gets repaired -- and
+                // nothing walks accounts/ again after the boot sweep. Handing the index's miss
+                // straight back tells interpre.cpp the address is free, which offers the player
+                // registration over the restored record, and write_account_file's occupancy check
+                // does not fire because the derived account name matches the record's own.
+                //
+                // One stat, not a walk: the path for an email is deterministic, so this cannot
+                // reintroduce the quadratic the index exists to remove.
+                const std::string normalized_email_key = normalize_email(email);
+                if (account_index::is_quarantined(normalized_email_key)
+                    || account_index::is_contested_email(normalized_email_key)) {
+                    // Already answered, deliberately, and must not be re-adopted here.
+                    return false;
+                }
+
+                const std::string appeared_path = account_file_path_from_email(root_directory, normalized_email_key);
+                AccountData appeared_account;
+                std::string appeared_error;
+                if (!path_exists(appeared_path)
+                    || !read_account_file_from_path(appeared_path, &appeared_account, &appeared_error)
+                    || normalize_email(appeared_account.normalized_email) != normalized_email_key)
+                    return false;
+
+                // Adopt it, so the resolvers, the creation guards and save_char all agree from here
+                // on rather than each rediscovering it.
+                account_index::upsert(appeared_account, appeared_path);
+                *account = appeared_account;
+                set_error(error_message, "");
+                return true;
+            }
             std::string read_error;
             if (read_account_file_from_path(indexed_path, account, &read_error)) {
                 set_error(error_message, "");

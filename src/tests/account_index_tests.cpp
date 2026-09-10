@@ -16,6 +16,34 @@
 
 namespace {
 
+// Byte-exact, because the assertion that matters for a record the server refused to read is that
+// it is still there UNCHANGED -- not merely that some file exists at the path.
+std::string read_whole_file(const std::string& path)
+{
+    FILE* file = std::fopen(path.c_str(), "rb");
+    if (file == nullptr)
+        return std::string();
+    std::string contents;
+    char buffer[512];
+    while (true) {
+        const size_t bytes_read = std::fread(buffer, sizeof(char), sizeof(buffer), file);
+        if (bytes_read > 0)
+            contents.append(buffer, bytes_read);
+        if (bytes_read < sizeof(buffer))
+            break;
+    }
+    std::fclose(file);
+    return contents;
+}
+
+void write_whole_file(const std::string& path, const std::string& contents)
+{
+    FILE* file = std::fopen(path.c_str(), "wb");
+    ASSERT_NE(file, nullptr);
+    ASSERT_EQ(std::fwrite(contents.data(), sizeof(char), contents.size(), file), contents.size());
+    ASSERT_EQ(std::fclose(file), 0);
+}
+
 account::AccountData make_account(const std::string& email, const std::string& name,
     const std::vector<std::string>& characters)
 {
@@ -1958,4 +1986,77 @@ TEST_F(AccountIndexTest, ARepairedRecordStopsBeingReportedUnreadableOnceItReadsA
 
     EXPECT_EQ(still_reported, 0u)
         << "a record that has just been read successfully must stop being listed as unreadable";
+}
+
+TEST_F(AccountIndexTest, RegisteringDoesNotDeleteALegacyFlatRecordItCannotRead)
+{
+    // An unparseable record is quarantined under its own PATH (it has disclosed no email to key it
+    // by), so is_quarantined("bob@example.com") misses, the address reads as free, and registration
+    // proceeds. write_account_file then composes legacy_flat_path from the ACCOUNT NAME --
+    // "bob@example.com" derives the name "bob", which is that very file -- and std::remove()s it.
+    // A real player's account record, deleted by someone else signing up.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    ASSERT_EQ(mkdir((root + "/accounts").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((root + "/accounts/A-E").c_str(), 0700), 0);
+
+    const std::string flat_path = root + "/accounts/A-E/bob.json";
+    const std::string original_bytes = "{ \"account_name\": \"bob\", this record no longer parses";
+    write_whole_file(flat_path, original_bytes);
+
+    account_index::set_root_directory(root);
+    account_index::set_enabled(true);
+
+    account::AccountData created;
+    std::string error_message;
+    const bool creation_succeeded = account::create_account_for_email(root, "bob@example.com",
+        "ValidPass1", 1700000001, &created, &error_message);
+
+    account_index::set_enabled(false);
+
+    EXPECT_FALSE(creation_succeeded) << "registration must not proceed over a record the server cannot read";
+    EXPECT_EQ(read_whole_file(flat_path), original_bytes)
+        << "a record the server cannot read must never be deleted -- it is the only copy";
+}
+
+TEST_F(AccountIndexTest, RegisteringDoesNotOverwriteARecordThatAppearedAfterBoot)
+{
+    // The index is built once at boot and nothing walks accounts/ again, so a record restored from
+    // backup while the game is up is invisible to it. find_account_by_email_internal's index fast
+    // path hard-returns on a miss with no fallback, every creation guard is index-keyed and misses
+    // too, and the derived account name matches the restored record's own -- so write_account_file's
+    // occupancy check (name equality) does not fire and the rename() lands on top of it.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    ASSERT_EQ(mkdir((root + "/accounts").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((root + "/accounts/A-E").c_str(), 0700), 0);
+
+    account_index::set_root_directory(root);
+    account_index::set_enabled(true);
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(root, "erik", "erik@example.com", "ValidPass1", 1700000000, nullptr, &error_message)) << error_message;
+
+    const std::string record_path = root + "/accounts/A-E/erik@example.com/account.json";
+    const std::string original_bytes = read_whole_file(record_path);
+    ASSERT_FALSE(original_bytes.empty());
+
+    // Exactly the post-restore state: the record is on disk, the index has never seen it.
+    account_index::clear();
+    account_index::set_root_directory(root);
+    account_index::set_enabled(true);
+
+    account::AccountData created;
+    const bool creation_succeeded = account::create_account_for_email(root, "erik@example.com",
+        "DifferentPw9", 1700000002, &created, &error_message);
+
+    account_index::set_enabled(false);
+
+    EXPECT_FALSE(creation_succeeded) << "the address is taken by a record that is right there on disk";
+    EXPECT_EQ(read_whole_file(record_path), original_bytes)
+        << "the restored record must survive -- its password hash and character list are in it";
 }
