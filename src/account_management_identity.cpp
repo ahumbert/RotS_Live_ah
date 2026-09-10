@@ -645,6 +645,14 @@ bool authenticate_account(const std::string& root_directory, const std::string& 
         return false;
     }
 
+    // The record just read, so it is no longer unreadable-since-boot. Cleared here rather than left
+    // to the write chokepoint that set it: a plain login writes NOTHING (interpre.cpp only calls
+    // clear_account_login_failures when there is a failure notice to show, and that function
+    // early-returns when the counters are already zero), so a record repaired by hand went on being
+    // listed by `account index` until something happened to write it or the server rebooted.
+    if (account_index_is_authoritative_for(root_directory))
+        account_index::clear_unreadable_at_runtime(normalize_email(stored_account.normalized_email));
+
     if (stored_account.blocked) {
         set_error(error_message, "Account authentication failed.");
         return false;

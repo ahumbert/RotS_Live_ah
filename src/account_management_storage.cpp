@@ -207,10 +207,11 @@ bool write_account_file(const std::string& root_directory, const AccountData& ac
     // Both refusals below happen BEFORE the temp file is opened, deliberately. They used to sit
     // after open_secure_output_file and returned without fclose() and without removing
     // "<final>.tmp", so every one of them leaked a descriptor and left a stray temp file behind.
-    // This function runs on every successful login (clear_account_login_failures), so a single
-    // account whose record will not parse leaked one descriptor per login attempt and walked a
-    // process that runs for weeks towards EMFILE -- at which point the server can neither accept
-    // connections nor write player files. Nothing between here and the open touches the
+    // Every account write comes through here -- a password change, linking or unlinking a
+    // character, email verification, a roster-sort change on menu exit, a login that had failures
+    // to clear -- so a single account whose record will not parse leaked one descriptor per such
+    // write and walked a process that runs for weeks towards EMFILE, at which point the server can
+    // neither accept connections nor write player files. Nothing between here and the open touches the
     // filesystem, so moving the checks up changes no on-disk ordering on the success path.
     if (path_exists(final_path)) {
         AccountData existing_account_at_target;
@@ -218,10 +219,14 @@ bool write_account_file(const std::string& root_directory, const AccountData& ac
         if (!read_account_file_from_path(final_path, &existing_account_at_target, &existing_read_error)) {
             // The post-boot half of the quarantine story. Boot walks every record and reports what
             // it cannot read; nothing walks the tree again afterwards, so a record that goes bad
-            // later was reported NOWHERE -- this function runs on every successful login
-            // (clear_account_login_failures), whose caller passes a null error_message and ignores
-            // the return, so the failure was completely silent. We already have the file open and
-            // already know it will not parse, so marking it here costs no walk and no extra I/O.
+            // later was reported NOWHERE. We already have the file open and already know it will
+            // not parse, so marking it here costs no walk and no extra I/O.
+            //
+            // Note what this does NOT catch: a quiet account nobody writes to. A plain login writes
+            // nothing (interpre.cpp calls clear_account_login_failures only when there is a failure
+            // notice to show, and that early-returns when the counters are already zero), so a
+            // record that corrupts after boot goes unnoticed until some write touches that account.
+            // Marking on the READ path would close that, and is its own change.
             //
             // Marked, not quarantined: quarantine withdraws the record's account-name and character
             // claims with no way back short of a reboot, so a transient EIO would cost a live player

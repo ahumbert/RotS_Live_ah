@@ -1924,3 +1924,38 @@ TEST_F(AccountIndexTest, ADisputedEmailAddressIsTakenAndRefusesAccountCreation)
     EXPECT_FALSE(creation_succeeded) << "a disputed address must not accept a third record";
     EXPECT_EQ(error_message, "An account already exists for that email address.");
 }
+
+TEST_F(AccountIndexTest, ARepairedRecordStopsBeingReportedUnreadableOnceItReadsAgain)
+{
+    // The unreadable-since-boot mark is set at the WRITE chokepoint, and cleared only because a
+    // successful write re-upserts the whole Entry. Four comments claim that chokepoint "runs on
+    // every successful login" -- it does not: interpre.cpp only calls clear_account_login_failures
+    // when there is a failure notice to show, and that function early-returns without writing when
+    // the counters are already zero. So after an operator repairs a record by hand, `account index`
+    // went on reporting UNREADABLE SINCE BOOT for a record that reads perfectly, until something
+    // happened to write it or the server rebooted.
+    IndexTemporaryDirectory root_directory;
+    ASSERT_FALSE(root_directory.path().empty());
+    const std::string root = root_directory.path();
+
+    ASSERT_EQ(mkdir((root + "/accounts").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((root + "/accounts/A-E").c_str(), 0700), 0);
+
+    account_index::set_root_directory(root);
+    account_index::set_enabled(true);
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(root, "bob", "bob@example.com", "ValidPass1", 1700000000, nullptr, &error_message)) << error_message;
+    ASSERT_TRUE(account_index::note_unreadable_at_runtime("bob@example.com", "Account record could not be read."));
+    ASSERT_EQ(account_index::unreadable_at_runtime_count(), 1u);
+
+    // Reading the record is the proof that it is readable again, whatever the rest of the
+    // authentication then decides.
+    account::authenticate_account(root, "bob", "ValidPass1", nullptr, nullptr);
+
+    const std::size_t still_reported = account_index::unreadable_at_runtime_count();
+    account_index::set_enabled(false);
+
+    EXPECT_EQ(still_reported, 0u)
+        << "a record that has just been read successfully must stop being listed as unreadable";
+}

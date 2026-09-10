@@ -170,7 +170,7 @@ namespace {
     {
         // O(1) rather than a walk of every indexed account name: an email owns exactly one account
         // name and the entry already stores it. This runs on every upsert, and upserts run on the
-        // login path (clear_account_login_failures fires on every successful login), so the walk was
+        // login path (clear_account_login_failures, on a login that had failures to clear), so the walk was
         // O(accounts) per login for a key we already had in hand.
         const auto owned_names = g_owned_account_names.find(email);
         if (owned_names != g_owned_account_names.end()) {
@@ -491,13 +491,26 @@ bool note_unreadable_at_runtime(const std::string& record_key, const std::string
     if (entry->second.quarantined)
         return false;
 
-    // Idempotent: the write chokepoint runs on every successful login, so a record that stays
-    // broken reaches this line repeatedly. Only the first arrival is news.
+    // Idempotent: every write to an account comes through the chokepoint that calls this, so a
+    // record that stays broken reaches this line once per write. Only the first arrival is news.
     if (entry->second.unreadable_at_runtime)
         return false;
 
     entry->second.unreadable_at_runtime = true;
     entry->second.unreadable_at_runtime_reason = reason;
+    return true;
+}
+
+bool clear_unreadable_at_runtime(const std::string& record_key)
+{
+    // No normalization, matching note_unreadable_at_runtime: callers key a record the same way it
+    // was keyed when the mark was set.
+    const auto entry = g_entries.find(record_key);
+    if (entry == g_entries.end() || !entry->second.unreadable_at_runtime)
+        return false;
+
+    entry->second.unreadable_at_runtime = false;
+    entry->second.unreadable_at_runtime_reason.clear();
     return true;
 }
 

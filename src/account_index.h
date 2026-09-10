@@ -59,8 +59,8 @@ void upsert(const account::AccountData& account, const std::string& record_path,
 
 // Marks a record the server failed to read AFTER boot, so it shows up in `account index` instead of
 // failing silently. Returns true only the FIRST time a given record is marked, which is how the
-// caller knows to log: the write chokepoint runs on every successful login, so logging
-// unconditionally would repeat the same line forever for one bad file.
+// caller knows to log: the write chokepoint runs on every write to an account, so logging
+// unconditionally would repeat the same line for one bad file at every one of them.
 //
 // Deliberately NOT quarantine(). Quarantine withdraws the record's account-name and character
 // claims, and there is no way back short of a reboot -- so a transient EIO or a moment of EACCES
@@ -71,6 +71,15 @@ void upsert(const account::AccountData& account, const std::string& record_path,
 // Only marks a record the index already holds. A key with no entry is not invented here: an entry
 // carries a record path that find_path_by_email would then hand out.
 bool note_unreadable_at_runtime(const std::string& record_key, const std::string& reason);
+
+// The other half of note_unreadable_at_runtime: a record that reads again is no longer unreadable,
+// so stop listing it as such. Returns true when a mark was actually cleared. Called from the READ
+// side, because a successful read is the only proof of repair that does not require the account to
+// be written -- and a plain login writes nothing (see clear_account_login_failures). Deliberately
+// not gated on the read's caller getting what it wanted: a wrong password still proves the file
+// parses. The log line and mudlog raised when the mark was set are permanent, so nothing is lost by
+// clearing the live flag.
+bool clear_unreadable_at_runtime(const std::string& record_key);
 
 // Every record marked by note_unreadable_at_runtime, for the wizard listing.
 std::vector<Entry> unreadable_at_runtime_entries();
