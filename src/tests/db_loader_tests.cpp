@@ -1957,13 +1957,15 @@ TEST(DbLoader, DoesNotTrustTheIndexWhenAnAccountBucketCannotBeRead)
         << "a bucket the server cannot read leaves the index incomplete, so it must not be authoritative";
 }
 
-TEST(DbLoader, IndexesADirectoryAccountWhoseDirectoryNameIsNotNormalized)
+TEST(DbLoader, RefusesADirectoryAccountThatIsNotAtThePathItsEmailResolvesTo)
 {
-    // account_index_quarantine_key normalizes the directory name before keying by it, and says why:
-    // the server writes it normalized, but a hand-made or restored directory need not be. The boot
-    // walk's mismatch check normalized only the record's own email, so a restored
-    // "accounts/A-E/Bob@Example.com/" disagreed with its own account.json and was quarantined --
-    // locking the player out and reserving their address against re-registration.
+    // Every path the running server composes for an account comes from
+    // normalize_email(account.normalized_email) plus a bucket computed from it, so a record filed
+    // anywhere else cannot be found by the game at all. An earlier version of this check compared
+    // normalize_email() on BOTH sides, which accepted a directory differing only in case -- and the
+    // walk then reached the character loop, where the read resolves through the normalized
+    // directory, gets ENOENT, and is reported as "does not exist": every character on the account
+    // dropped from the player index with no log line and no counter. Refuse the record instead.
     TemporaryDirectory temp_directory;
     ScopedWorkingDirectory working_directory(temp_directory.path());
 
@@ -1981,13 +1983,45 @@ TEST(DbLoader, IndexesADirectoryAccountWhoseDirectoryNameIsNotNormalized)
     build_account_native_player_index();
 
     std::string record_path;
-    const bool found = account_index::find_path_by_email("bob@example.com", &record_path, nullptr);
+    const bool resolves = account_index::find_path_by_email("bob@example.com", &record_path, nullptr);
+    const bool reserved = account_index::is_quarantined("bob@example.com");
     const std::size_t quarantined = account_index::quarantined_count();
     account_index::set_enabled(false);
     account_index::clear();
 
-    EXPECT_EQ(quarantined, 0u) << "a directory name that is merely unnormalized is not a mismatched record";
-    EXPECT_TRUE(found) << "the account must stay reachable by its own email address";
+    EXPECT_EQ(quarantined, 1u) << "a record the game cannot resolve must be refused, not indexed";
+    EXPECT_FALSE(resolves) << "it must not answer lookups for an address whose files it cannot reach";
+    EXPECT_TRUE(reserved) << "and its address must stay reserved, or registration writes over the owner";
+}
+
+TEST(DbLoader, ReservesTheAddressADirectoryAccountDeclaresAsWellAsTheOneItIsFiledUnder)
+{
+    // Filed under alice@..., declares alice2@... . Quarantining only the directory name leaves the
+    // DECLARED address -- the one the owner types at the login prompt -- reading free, so
+    // create_account_for_email writes a fresh empty account there while the real record sits inert.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+
+    ASSERT_EQ(mkdir("accounts", 0700), 0);
+    ASSERT_EQ(mkdir("accounts/A-E", 0700), 0);
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(".", "alpha-admin", "alice2@example.com", "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
+    ASSERT_EQ(rename("accounts/A-E/alice2@example.com", "accounts/A-E/alice@example.com"), 0);
+
+    account_index::clear();
+    account_index::set_root_directory(".");
+    account_index::set_enabled(true);
+
+    build_account_native_player_index();
+
+    const bool filed_under_reserved = account_index::is_quarantined("alice@example.com");
+    const bool declared_reserved = account_index::is_quarantined("alice2@example.com");
+    account_index::set_enabled(false);
+    account_index::clear();
+
+    EXPECT_TRUE(filed_under_reserved) << "the address it is filed under must be reserved";
+    EXPECT_TRUE(declared_reserved) << "so must the address it declares -- that is the one its owner types";
 }
 
 TEST(DbLoader, DoesNotTrustTheIndexWhenAnAccountBucketCannotBeStatted)

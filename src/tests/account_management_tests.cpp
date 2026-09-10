@@ -5043,3 +5043,42 @@ TEST(AccountManagement, RenamingACharacterTheAccountDoesNotOwnIsRefused)
         account_data.account_name, "stranger", "newname", 1700006201, &account_data, &error_message));
     EXPECT_NE(error_message.find("not linked"), std::string::npos) << error_message;
 }
+
+TEST(AccountManagement, RefusesToRenameALinkedCharacterWhoseCharacterFileIsMissing)
+{
+    // The staged-move loop skipped any source that stat()'d ENOENT, uniformly -- including the
+    // character file. That is the one condition meaning the rename cannot be carried out: all three
+    // moves no-op, account.json and character_links are rewritten to the new name, the index is
+    // upserted and player_table[].ch_file is repointed, and rename_char returns success. The account
+    // then lists a character with no file behind it -- the "[ ?? ???]" roster row this function
+    // exists to prevent. validate_account_owned_character_path does not cover it: it string-compares
+    // the stored path against character_json_file_name() and stats nothing.
+    TemporaryDirectory temp_directory;
+    account::AccountData account_data;
+    std::string error_message;
+
+    ASSERT_TRUE(account::create_account_for_email(temp_directory.path(), "player@example.com",
+        "ValidPass1", 1700006000, &account_data, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_link_character(temp_directory.path(), account_data.account_name,
+        "oldname", 1700006001, &account_data, &error_message)) << error_message;
+    write_linked_character_files(temp_directory.path(), account_data.account_name, "oldname", "payload");
+
+    const std::string old_character = account::account_character_player_path(temp_directory.path(), account_data.account_name, "oldname");
+    ASSERT_EQ(std::remove(old_character.c_str()), 0);
+
+    EXPECT_FALSE(account::admin_rename_linked_character(temp_directory.path(),
+        account_data.account_name, "oldname", "newname", 1700006002, &account_data, &error_message))
+        << "a rename with no character file to move must be refused, not reported as done";
+    EXPECT_NE(error_message.find("is not there"), std::string::npos) << "reported as: " << error_message;
+
+    account::AccountData stored_account;
+    ASSERT_TRUE(account::read_account_file(temp_directory.path(), account_data.account_name, &stored_account, &error_message)) << error_message;
+    EXPECT_TRUE(account::account_has_character(stored_account, "oldname"))
+        << "the account must still claim the character by the name its files are under";
+    EXPECT_FALSE(account::account_has_character(stored_account, "newname"))
+        << "and must not have been repointed at a name with nothing behind it";
+
+    // The object and exploits files must not have been left half-moved either.
+    EXPECT_TRUE(path_is_present(account::account_character_object_path(temp_directory.path(), account_data.account_name, "oldname")));
+    EXPECT_TRUE(path_is_present(account::account_character_exploits_path(temp_directory.path(), account_data.account_name, "oldname")));
+}

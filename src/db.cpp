@@ -659,16 +659,39 @@ namespace {
         }
 
         if (record.directory_layout) {
-            // Both sides normalized, for the reason account_index_quarantine_key states when it
-            // normalizes this same directory name: the server writes it normalized, but a hand-made
-            // or restored directory need not be. Comparing a normalized email against a raw
-            // directory name quarantines such a record -- locking the player out and reserving the
-            // address against re-registration -- over a difference that is only in case.
-            if (account::normalize_email(record.account.normalized_email) != account::normalize_email(record.directory_entry_name)) {
-                sprintf(buf, "Account-native index source '%s' has mismatched normalized email '%s'.",
-                    record.record_path.c_str(), record.account.normalized_email.c_str());
+            // The record must be AT the path its own email says it is at. Every other path in the
+            // server -- save_char, character reads, the roster -- is composed from
+            // normalize_email(account.normalized_email) and a bucket computed from it, so a record
+            // filed anywhere else is one the running game cannot find: its saves would land in a
+            // second directory beside it and its characters would read as absent. Comparing the
+            // whole canonical path rather than just the directory name is what also catches a record
+            // sitting in the wrong BUCKET, whose name matches perfectly.
+            //
+            // An earlier version of this compared normalize_email() on both sides, which ACCEPTED a
+            // directory that differs only in case. That is worse than quarantining it: the walk then
+            // reaches the character loop below, whose read resolves through the normalized directory
+            // and gets ENOENT, which inspect_account_character_file_from_record reports as "does not
+            // exist" -- so every character on the account is dropped from the player index with no
+            // log line and no counter. Refusing the record is the loud failure; accepting it is the
+            // silent one.
+            const std::string declared_email = account::normalize_email(record.account.normalized_email);
+            const std::string canonical_record_path = "./accounts/"
+                + account::account_bucket_for_name(declared_email) + "/" + declared_email + "/account.json";
+            if (record.record_path != canonical_record_path) {
+                sprintf(buf, "Account-native index source '%s' is not at the path its email '%s' resolves to ('%s').",
+                    record.record_path.c_str(), record.account.normalized_email.c_str(), canonical_record_path.c_str());
                 log(buf);
-                account_index::quarantine(account::account_index_quarantine_key(record), record.record_path, buf);
+
+                const std::string filed_under = account::account_index_quarantine_key(record);
+                account_index::quarantine(filed_under, record.record_path, buf);
+
+                // Reserve the address the record DECLARES as well as the one it is filed under.
+                // They are different in exactly this case, and the declared one is what its owner
+                // types at the login prompt -- leave it unreserved and it reads as free, so
+                // registration writes a fresh empty account at the player's real address while
+                // their record sits inert under the other name.
+                if (!declared_email.empty() && declared_email != filed_under)
+                    account_index::quarantine(declared_email, record.record_path, buf);
                 return;
             }
         } else {

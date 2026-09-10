@@ -1144,6 +1144,10 @@ bool admin_rename_linked_character(const std::string& root_directory, const std:
         std::string from;
         std::string to;
         const char* label = "";
+        // The character file is the character. An object or exploits file may legitimately not
+        // exist yet; the character file not existing is the one condition that means this rename
+        // cannot be carried out at all, so it must not be forgiven along with them.
+        bool required = false;
         bool moved = false;
     };
 
@@ -1157,13 +1161,13 @@ bool admin_rename_linked_character(const std::string& root_directory, const std:
     std::vector<StagedMove> staged_moves = {
         { resolved_character_path(stored_account, root_directory, normalized_character_name),
             resolved_character_path(stored_account, root_directory, normalized_new_name),
-            "account character file", false },
+            "account character file", true, false },
         { resolved_object_path(stored_account, root_directory, normalized_character_name),
             resolved_object_path(stored_account, root_directory, normalized_new_name),
-            "account object file", false },
+            "account object file", false, false },
         { resolved_exploits_path(stored_account, root_directory, normalized_character_name),
             resolved_exploits_path(stored_account, root_directory, normalized_new_name),
-            "account exploits file", false }
+            "account exploits file", false, false }
     };
 
     // Refuse before moving anything if a destination is already occupied. account_has_character
@@ -1191,12 +1195,21 @@ bool admin_rename_linked_character(const std::string& root_directory, const std:
     for (StagedMove& staged_move : staged_moves) {
         struct stat file_info { };
         if (stat(staged_move.from.c_str(), &file_info) != 0) {
-            // A character can legitimately lack an object or exploits file; the character file
-            // itself is the one that must exist, and validate_account_owned_character_path has
-            // already vouched for its path.
-            if (errno == ENOENT)
+            // A character can legitimately lack an object or exploits file, so those are skipped.
+            // The character file is NOT skippable: validate_account_owned_character_path vouches
+            // only for the SHAPE of the stored path (it string-compares against
+            // character_json_file_name and stats nothing), so nothing before this point has
+            // established that the file is there. Forgiving it moved nothing while account.json,
+            // the index and player_table[].ch_file were all repointed at a name with no file --
+            // the "[ ?? ???]" roster row this whole function exists to prevent, reported to the
+            // immortal as a success.
+            if (errno == ENOENT && !staged_move.required)
                 continue;
-            set_error(error_message, std::string("Failed to inspect ") + staged_move.label + " '" + staged_move.from + "': " + std::strerror(errno));
+
+            if (errno == ENOENT)
+                set_error(error_message, std::string("Refusing to rename: the ") + staged_move.label + " '" + staged_move.from + "' is not there.");
+            else
+                set_error(error_message, std::string("Failed to inspect ") + staged_move.label + " '" + staged_move.from + "': " + std::strerror(errno));
             undo_staged_moves();
             return false;
         }
