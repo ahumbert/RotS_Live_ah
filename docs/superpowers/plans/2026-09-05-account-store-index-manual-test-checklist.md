@@ -120,8 +120,9 @@ lasts only for the life of the process — reboot and the boot walk decides agai
 
 `account index` names every record the server could not read, with its path and the reason. Since
 nothing on disk changed and quarantine moves no file, the record is where it has always been and can
-be inspected or repaired in place. A repaired record needs a reboot to leave quarantine; one merely
-marked unreadable-since-boot clears on the next successful write.
+be inspected or repaired in place. A repaired record needs a reboot to leave QUARANTINE; one merely
+marked unreadable-since-boot clears as soon as the server reads it successfully again -- the next
+login against that account is enough -- or on the next successful write to it.
 
 ---
 
