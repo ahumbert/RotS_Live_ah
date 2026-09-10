@@ -38,7 +38,6 @@ void clear_char(struct char_data* ch, int mode);
 void save_player(struct char_data* ch, int load_room, int index_pos);
 void store_to_char(struct char_file_u* st, struct char_data* ch);
 int Crash_alias_load(struct char_data* ch, FILE* fp);
-int rename_char(struct char_data* ch, char* newname);
 
 namespace {
 
@@ -2122,4 +2121,24 @@ TEST(DbLoader, RefusesARenameWhoseAccountNativePathWouldNotFitThePlayerIndex)
     account::AccountData account_data;
     ASSERT_TRUE(account::read_account_file(".", "long-account", &account_data, &error_message)) << error_message;
     EXPECT_TRUE(account::account_has_character(account_data, "aragorn")) << "the account must still claim the character by its old name";
+}
+
+TEST(DbLoader, RefusesARenameToANameThatIsAlreadyTakenAndSaysSo)
+{
+    // The only caller that can reach rename_char is `wizset <victim> name <newname>`, and it has
+    // nothing but the return value to go on. This refusal in particular logged nothing at all, so
+    // an immortal renaming onto an existing name had no way to find out that is what happened.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+    ScopedPlayerTableEntry player_table_entry("aragorn");
+
+    char_file_u stored_character = make_stored_character("aragorn");
+    char_data character {};
+    clear_char(&character, MOB_VOID);
+    store_to_char(&stored_character, &character);
+
+    char taken_name[] = "Aragorn";
+    std::string rename_error;
+    EXPECT_EQ(rename_char(&character, taken_name, &rename_error), -1);
+    EXPECT_NE(rename_error.find("already"), std::string::npos) << "reported as: " << rename_error;
 }

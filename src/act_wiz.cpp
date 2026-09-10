@@ -3045,7 +3045,7 @@ ACMD(do_wizset)
     case 57:
         vict->player.height = value;
         break;
-    case 58:
+    case 58: {
         if (!*val_arg) {
             act("What new name would you like to give to $N?",
                 FALSE, ch, 0, vict, TO_CHAR);
@@ -3060,10 +3060,22 @@ ACMD(do_wizset)
             send_to_char("Invalid name, please try another.", ch);
             return;
         }
-        extern int rename_char(struct char_data*, char*);
-        rename_char(vict, val_arg);
-        send_to_char("You changed their name successfully.\n\r", ch);
+        // rename_char's answer is the only thing standing between an immortal and a silent failure:
+        // it refuses a name that is taken, one the account layer rejects, and one whose stored path
+        // would not fit the player index, changing nothing in every case.
+        std::string rename_error;
+        if (rename_char(vict, val_arg, &rename_error) < 0) {
+            snprintf(buf1, MAX_STRING_LENGTH, "That rename was refused -- nothing was changed: %s\n\r",
+                rename_error.c_str());
+            send_to_char(buf1, ch);
+            return;
+        }
+        // Into `buf` rather than straight to the character: rename_char writes `buf` throughout (it
+        // begins by filling it with Crash_get_filename), and the tail below sends `buf` after the
+        // switch -- so saying it here directly printed the success line plus a line of leftovers.
+        sprintf(buf, "You changed their name successfully.");
         break;
+    }
 
     case 59:
         if (!*val_arg) {

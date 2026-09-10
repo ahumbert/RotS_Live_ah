@@ -18,8 +18,10 @@
 
 ACMD(do_account);
 ACMD(do_whoacct);
+ACMD(do_wizset);
 extern struct player_index_element* player_table;
 extern struct descriptor_data* descriptor_list;
+extern struct char_data* character_list;
 extern int top_of_p_table;
 void clear_char(struct char_data* ch, int mode);
 void save_player(struct char_data* ch, int load_room, int index_pos);
@@ -124,6 +126,23 @@ public:
 
 private:
     descriptor_data* m_previous_descriptor_list;
+};
+
+class ScopedCharacterList {
+public:
+    ScopedCharacterList()
+        : m_previous_character_list(character_list)
+    {
+        character_list = nullptr;
+    }
+
+    ~ScopedCharacterList()
+    {
+        character_list = m_previous_character_list;
+    }
+
+private:
+    char_data* m_previous_character_list;
 };
 
 descriptor_data make_descriptor()
@@ -938,3 +957,90 @@ TEST(ActWiz, WhoAcctFormatsLongFieldsIntoStableColumns)
 }
 
 } // namespace
+
+// --- wizset <victim> name <newname> ---------------------------------------------------------
+//
+// The only reachable caller of rename_char (`rent namechange` sits behind an unconditional
+// `return TRUE;` at objsave.cpp:1692). It discarded rename_char's result, so every refusal the
+// account layer makes -- including the over-length player-index path -- was reported to the
+// immortal as a success while the character kept its old name.
+
+// Puts an implementor in the world who owns an account-native character file, and returns them.
+// Renaming yourself is the shape that needs no room: CAN_SEE returns 1 immediately for sub == obj.
+char_data* make_account_native_implementor(descriptor_data* descriptor, const char* account_name,
+    const char* email, const char* bucket)
+{
+    EXPECT_EQ(mkdir("accounts", 0700), 0);
+    EXPECT_EQ(mkdir((std::string("accounts/") + bucket).c_str(), 0700), 0);
+    EXPECT_EQ(mkdir("players", 0700), 0);
+    EXPECT_EQ(mkdir("players/A-E", 0700), 0);
+
+    std::string error_message;
+    EXPECT_TRUE(account::create_account(".", account_name, email, "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
+    EXPECT_TRUE(account::admin_link_character(".", account_name, "aragorn", 1700010102, nullptr, &error_message)) << error_message;
+
+    char_file_u stored_character = make_stored_character("aragorn", LEVEL_IMPL);
+    EXPECT_TRUE(account::write_account_character_file(".", account_name, stored_character, &error_message)) << error_message;
+    std::snprintf(player_table[0].ch_file, sizeof(player_table[0].ch_file), "%s",
+        account::account_character_player_path(".", account_name, "aragorn").c_str());
+
+    char_data* implementor = attach_active_character(descriptor, "aragorn", LEVEL_IMPL, 1234);
+    std::snprintf(descriptor->account_name, sizeof(descriptor->account_name), "%s", account_name);
+    character_list = implementor;
+    return implementor;
+}
+
+TEST(ActWiz, WizsetNameReportsARefusedRenameRatherThanClaimingSuccess)
+{
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+    ScopedDescriptorList descriptor_list_guard;
+    ScopedCharacterList character_list_guard;
+    ScopedPlayerTableEntry player_table_entry("aragorn");
+
+    descriptor_data descriptor = make_descriptor();
+    // Long enough that "./accounts/F-J/<email>/bartholomew.character.json" does not fit ch_file.
+    char_data* implementor = make_account_native_implementor(&descriptor, "long-account",
+        "firstname.lastname@somecompanyname.com", "F-J");
+
+    char command[] = "player aragorn name Bartholomew";
+    do_wizset(implementor, command, nullptr, 0, 0);
+
+    const std::string output = descriptor.output;
+    EXPECT_EQ(output.find("successfully"), std::string::npos)
+        << "a refused rename must not be reported as a success -- got: " << output;
+    EXPECT_NE(output.find("refused"), std::string::npos)
+        << "the immortal must be told the rename was refused -- got: " << output;
+    EXPECT_NE(output.find("player index"), std::string::npos)
+        << "and told why, rather than being sent to the syslog -- got: " << output;
+    EXPECT_STREQ(implementor->player.name, "aragorn") << "the character must keep its name";
+
+    free(implementor->player.name);
+    delete implementor;
+}
+
+TEST(ActWiz, WizsetNameSaysOnlyThatTheRenameSucceeded)
+{
+    // rename_char writes the shared `buf` all the way through (it starts by filling it with
+    // Crash_get_filename), and do_wizset's tail sends `buf` to the immortal after the switch. So a
+    // successful rename printed its success line and then a second line of whatever rename_char had
+    // last left in the buffer.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+    ScopedDescriptorList descriptor_list_guard;
+    ScopedCharacterList character_list_guard;
+    ScopedPlayerTableEntry player_table_entry("aragorn");
+
+    descriptor_data descriptor = make_descriptor();
+    char_data* implementor = make_account_native_implementor(&descriptor, "alpha-admin",
+        "player@example.com", "A-E");
+
+    char command[] = "player aragorn name Bartholomew";
+    do_wizset(implementor, command, nullptr, 0, 0);
+
+    EXPECT_EQ(std::string(descriptor.output), "You changed their name successfully.\n\r");
+    EXPECT_STREQ(implementor->player.name, "Bartholomew");
+
+    free(implementor->player.name);
+    delete implementor;
+}

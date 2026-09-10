@@ -233,6 +233,11 @@ struct exploit_record {
     int iKillerLevel; /* at time of kill */
     int iIntParam; /* reserved */
 };
+// Renames a live character, moving its files. Returns 1 on success and -1 when the rename was
+// REFUSED, in which case nothing was changed; `error_message`, when given, says why in words the
+// only caller (`wizset <victim> name <newname>`) can show an immortal.
+int rename_char(struct char_data* ch, char* newname, std::string* error_message = nullptr);
+
 bool load_exploit_records_for_character(const std::string& root_directory, const std::string& character_name, std::vector<exploit_record>* records, std::string* error_message = nullptr);
 bool write_exploit_record_for_character(const std::string& root_directory, const std::string& character_name, const exploit_record& record, std::string* error_message = nullptr);
 bool load_object_save_bytes_for_character(const std::string& root_directory, const std::string& character_name, std::string* bytes, std::string* error_message = nullptr);

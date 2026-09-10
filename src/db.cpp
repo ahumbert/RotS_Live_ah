@@ -4880,10 +4880,19 @@ struct account_native_rename {
     std::string new_character_path;
 };
 
+// A refusal is both logged (for the syslog) and reported back in words, because the only caller that
+// can reach a rename is `wizset <victim> name <newname>`, which has an immortal waiting on an answer.
+static void set_rename_error(std::string* error_message, const std::string& message)
+{
+    if (error_message != nullptr)
+        *error_message = message;
+}
+
 // Returns false only when the rename should be ABANDONED. A character that is not account-native is
 // not this function's business and reports success with plan->applies left false. Nothing on disk
 // has moved when this returns, either way.
-static bool plan_account_native_rename(struct char_data* ch, int player_i, const char* newname, account_native_rename* plan)
+static bool plan_account_native_rename(struct char_data* ch, int player_i, const char* newname,
+    account_native_rename* plan, std::string* error_message)
 {
     *plan = account_native_rename();
     if (!has_suffix(player_table[player_i].ch_file, ".character.json"))
@@ -4894,6 +4903,7 @@ static bool plan_account_native_rename(struct char_data* ch, int player_i, const
         sprintf(buf, "rename_char: refusing to rename account-native character %s to %s: the account layer rejects that name",
             plan->old_name.c_str(), newname);
         log(buf);
+        set_rename_error(error_message, "the account layer will not accept that name.");
         return false;
     }
 
@@ -4902,6 +4912,7 @@ static bool plan_account_native_rename(struct char_data* ch, int player_i, const
         sprintf(buf, "rename_char: refusing to rename %s: linked ownership could not be resolved: %s",
             plan->old_name.c_str(), account_error.c_str());
         log(buf);
+        set_rename_error(error_message, "the owning account could not be resolved: " + account_error);
         return false;
     }
 
@@ -4909,6 +4920,7 @@ static bool plan_account_native_rename(struct char_data* ch, int player_i, const
         sprintf(buf, "rename_char: refusing to rename %s: stored in account storage but no account claims it",
             plan->old_name.c_str());
         log(buf);
+        set_rename_error(error_message, "the character is in account storage but no account claims it.");
         return false;
     }
 
@@ -4925,6 +4937,7 @@ static bool plan_account_native_rename(struct char_data* ch, int player_i, const
             plan->old_name.c_str(), newname, plan->new_character_path.size(),
             sizeof(player_table[player_i].ch_file) - 1);
         log(buf);
+        set_rename_error(error_message, "that name makes the stored path too long for the player index. A shorter name will fit.");
         return false;
     }
 
@@ -4934,7 +4947,8 @@ static bool plan_account_native_rename(struct char_data* ch, int player_i, const
 
 // Moves the character, object and exploits files, rewrites account.json, and repoints the player
 // index at the new path. Returns false when the rename could not be carried out.
-static bool commit_account_native_rename(int player_i, const char* newname, const account_native_rename& plan)
+static bool commit_account_native_rename(int player_i, const char* newname,
+    const account_native_rename& plan, std::string* error_message)
 {
     std::string rename_error;
     if (!account::admin_rename_linked_character(".", plan.owner_account_name, plan.old_name, newname,
@@ -4942,6 +4956,7 @@ static bool commit_account_native_rename(int player_i, const char* newname, cons
         sprintf(buf, "rename_char: could not rename %s to %s in account %s: %s",
             plan.old_name.c_str(), newname, plan.owner_account_name.c_str(), rename_error.c_str());
         log(buf);
+        set_rename_error(error_message, "the account layer could not carry it out: " + rename_error);
         return false;
     }
 
@@ -4952,20 +4967,37 @@ static bool commit_account_native_rename(int player_i, const char* newname, cons
     return true;
 }
 
-int rename_char(struct char_data* ch, char* newname)
+int rename_char(struct char_data* ch, char* newname, std::string* error_message)
 {
     char namebuf[64], *c, new_exploit_file[64], old_exploit_file[64];
     int player_i, i;
 
-    if ((!*newname || !ch) || (find_player_in_table(newname, -1) != -1) || (!Crash_get_filename(GET_NAME(ch), buf)) || ((player_i = find_name(GET_NAME(ch))) < 0))
+    // Split one condition per refusal: the caller is an immortal typing `wizset ... name ...`, and
+    // "it did not work" without a reason is what sent them to the syslog to guess.
+    set_rename_error(error_message, "");
+    if (!*newname || !ch) {
+        set_rename_error(error_message, "no new name was given.");
         return -1;
+    }
+    if (find_player_in_table(newname, -1) != -1) {
+        set_rename_error(error_message, "that name is already taken.");
+        return -1;
+    }
+    if (!Crash_get_filename(GET_NAME(ch), buf)) {
+        set_rename_error(error_message, "that character's object file could not be resolved.");
+        return -1;
+    }
+    if ((player_i = find_name(GET_NAME(ch))) < 0) {
+        set_rename_error(error_message, "that character is not in the player index.");
+        return -1;
+    }
 
     // Account-native characters are renamed through the account layer, which moves the three files
     // and rewrites account.json together. A refusal here aborts the rename entirely rather than
     // falling through to the legacy path, whose rm would destroy the character. Nothing has moved
     // yet -- only the decision has been made.
     account_native_rename account_rename;
-    if (!plan_account_native_rename(ch, player_i, newname, &account_rename))
+    if (!plan_account_native_rename(ch, player_i, newname, &account_rename, error_message))
         return -1;
 
     /* note this in exploits, i hate the ! on NOTE, so we use ACHIEVEMENT */
@@ -4980,7 +5012,7 @@ int rename_char(struct char_data* ch, char* newname)
     add_exploit_record(EXPLOIT_ACHIEVEMENT, ch, 0, namebuf);
 
     const bool renamed_in_account_storage = account_rename.applies;
-    if (renamed_in_account_storage && !commit_account_native_rename(player_i, newname, account_rename))
+    if (renamed_in_account_storage && !commit_account_native_rename(player_i, newname, account_rename, error_message))
         return -1;
 
     if (!renamed_in_account_storage) {
