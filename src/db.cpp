@@ -4158,13 +4158,30 @@ void forget_crimes(char_data* ch, int criminal)
 //*************************************************************************
 //*************************************************************************
 
+// Every member, not the six this used to set. The world is allocated with `new room_data[]`, so
+// anything left out here is whatever the allocator last had in that block until the loader writes
+// it -- and IS_DARK (utils.h) reads sector_type, room_flags and light, so a room that has not been
+// loaded yet answers "is it dark in here?" out of stale heap bytes. room_track and bleed_track are
+// absent on purpose: their own element constructors already zero them.
 room_data::room_data()
 {
     number = -1;
     zone = 0;
     level = 0;
+    sector_type = SECT_INSIDE;
     name = 0;
     description = 0;
+    ex_description = 0;
+    for (int direction = 0; direction < NUM_OF_DIRS; direction++)
+        dir_option[direction] = 0;
+    room_flags = 0;
+    alignment = 0;
+    light = 0;
+    bfs_dir = 0;
+    bfs_next = 0;
+    funct = 0;
+    contents = 0;
+    people = 0;
     affected = NULL;
 }
 

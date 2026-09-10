@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <limits.h>
+#include <new>
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
@@ -2141,4 +2142,31 @@ TEST(DbLoader, RefusesARenameToANameThatIsAlreadyTakenAndSaysSo)
     std::string rename_error;
     EXPECT_EQ(rename_char(&character, taken_name, &rename_error), -1);
     EXPECT_NE(rename_error.find("already"), std::string::npos) << "reported as: " << rename_error;
+}
+
+TEST(DbLoader, ANewRoomStartsInitializedRatherThanWithWhateverWasOnTheHeap)
+{
+    // room_data::room_data() set six of its members and left every other one indeterminate --
+    // including sector_type, room_flags and light, which are the exact three IS_DARK reads
+    // (utils.h:238), and the people/contents/dir_option pointers. The world is allocated with
+    // `new room_data[]`, so a room the loader has not filled in yet answers "is it dark in here?"
+    // out of whatever the allocator last left in that block. In the test binary that made
+    // SpellParser.MagicRoomMessageOmitsColorCodesForObserversWithoutColorEnabled pass or fail
+    // depending on which other tests ran first.
+    alignas(room_data) unsigned char storage[sizeof(room_data)];
+    std::memset(storage, 0xAA, sizeof(storage));
+
+    room_data* room = new (storage) room_data();
+
+    EXPECT_EQ(static_cast<int>(room->light), 0);
+    EXPECT_EQ(room->room_flags, 0L);
+    EXPECT_EQ(room->sector_type, SECT_INSIDE);
+    EXPECT_EQ(room->alignment, 0);
+    EXPECT_EQ(room->people, nullptr);
+    EXPECT_EQ(room->contents, nullptr);
+    EXPECT_EQ(room->ex_description, nullptr);
+    EXPECT_EQ(room->funct, nullptr);
+    EXPECT_EQ(room->bfs_next, nullptr);
+    for (int direction = 0; direction < NUM_OF_DIRS; ++direction)
+        EXPECT_EQ(room->dir_option[direction], nullptr) << "direction " << direction;
 }
