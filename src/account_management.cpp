@@ -161,9 +161,9 @@ namespace {
         case 0:
             return "Gods";
         case 1:
-            return "Lights";
+            return "Good";
         case 2:
-            return "Darks";
+            return "Evil";
         case 3:
             return "Third Side";
         default:
