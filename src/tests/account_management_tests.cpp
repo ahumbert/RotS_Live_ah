@@ -3905,15 +3905,15 @@ TEST_F(RosterOrderTest, SideSortRendersLabelledSectionsWithContinuousNumbering)
         ".", account_data, account::RosterSort::Side, account::RosterFilter::None);
 
     EXPECT_NE(prompt.find("-- Gods --"), std::string::npos) << prompt;
-    EXPECT_NE(prompt.find("-- Lights --"), std::string::npos) << prompt;
-    EXPECT_NE(prompt.find("-- Darks --"), std::string::npos) << prompt;
+    EXPECT_NE(prompt.find("-- Good --"), std::string::npos) << prompt;
+    EXPECT_NE(prompt.find("-- Evil --"), std::string::npos) << prompt;
     // No third-side character linked, so that header must not appear at all.
     EXPECT_EQ(prompt.find("-- Third Side --"), std::string::npos) << prompt;
 
     // Sections appear in side order, and numbering runs 1,2,3 straight through them.
     const size_t gods = prompt.find("-- Gods --");
-    const size_t lights = prompt.find("-- Lights --");
-    const size_t darks = prompt.find("-- Darks --");
+    const size_t lights = prompt.find("-- Good --");
+    const size_t darks = prompt.find("-- Evil --");
     EXPECT_LT(gods, lights);
     EXPECT_LT(lights, darks);
     EXPECT_NE(prompt.find("1) [  0 Imm] Godone"), std::string::npos) << prompt;
@@ -3956,7 +3956,7 @@ TEST_F(RosterOrderTest, ColumnPairingResetsAtEachSectionBoundary)
         ".", account_data, account::RosterSort::Side, account::RosterFilter::None);
     const std::vector<std::string> lines = split_on_terminator(prompt);
 
-    const auto lights_it = std::find(lines.begin(), lines.end(), "-- Lights --");
+    const auto lights_it = std::find(lines.begin(), lines.end(), "-- Good --");
     ASSERT_NE(lights_it, lines.end()) << prompt;
     const size_t lights = static_cast<size_t>(lights_it - lines.begin());
     ASSERT_LE(lights + 7, lines.size() - 1) << "prompt is shorter than expected:\n" << prompt;
@@ -3978,7 +3978,7 @@ TEST_F(RosterOrderTest, ColumnPairingResetsAtEachSectionBoundary)
 
     // Exactly one blank line separates the odd trailer from the next header.
     EXPECT_EQ(lines[lights + 3], "") << prompt;
-    EXPECT_EQ(lines[lights + 4], "-- Darks --") << prompt;
+    EXPECT_EQ(lines[lights + 4], "-- Evil --") << prompt;
 
     // Darks section (2 rows, even): row 4 starts a fresh line right after its own header, paired
     // with row 5 -- proving the reset actually put column back to 0 rather than merely happening to
