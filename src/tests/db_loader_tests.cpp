@@ -1357,6 +1357,51 @@ TEST(DbLoader, CrashLoadConsumesStagedAccountBackedObjectBytesAndLoadsAliasTail)
     EXPECT_STREQ(GET_ALIAS(&character)->command, "kill orc");
 }
 
+TEST(DbLoader, CrashLoadTerminatesALegacyAliasKeywordThatFillsTheWholeField)
+{
+    ensure_test_world_room(3001);
+
+    char_data character {};
+    clear_char(&character, MOB_VOID);
+
+    char_file_u stored_character {};
+    std::snprintf(stored_character.name, sizeof(stored_character.name), "%s", "aragorn");
+    stored_character.sex = SEX_MALE;
+    stored_character.race = RACE_HUMAN;
+    stored_character.bodytype = 1;
+    stored_character.level = 10;
+    stored_character.language = LANG_HUMAN;
+    stored_character.specials2.load_room = 3001;
+    stored_character.weight = 210;
+    stored_character.height = 72;
+    store_to_char(&stored_character, &character);
+
+    objects_json::ObjectSaveData object_data;
+    object_data.rent.rentcode = RENT_CRASH;
+    object_data.aliases.push_back({ "nineteen_characters", "kill orc" });
+
+    std::string object_bytes;
+    std::string error_message;
+    ASSERT_TRUE(objects_json::object_save_data_to_binary(object_data, &object_bytes, &error_message)) << error_message;
+
+    // The legacy save stores the keyword as 20 raw bytes, so an alias of exactly 20
+    // characters reaches the loader with no terminator of its own.
+    const size_t keyword_offset = object_bytes.find("nineteen_characters");
+    ASSERT_NE(keyword_offset, std::string::npos);
+    ASSERT_EQ(object_bytes[keyword_offset + 19], '\0');
+    object_bytes[keyword_offset + 19] = 'x';
+
+    stage_account_backed_object_bytes_for_character(&character, object_bytes.data(), object_bytes.size());
+    FILE* fp = Crash_load(&character);
+    ASSERT_NE(fp, nullptr);
+    ASSERT_TRUE(Crash_alias_load(&character, fp));
+    ASSERT_EQ(std::fclose(fp), 0);
+
+    ASSERT_NE(GET_ALIAS(&character), nullptr);
+    EXPECT_STREQ(GET_ALIAS(&character)->keyword, "nineteen_characters");
+    EXPECT_STREQ(GET_ALIAS(&character)->command, "kill orc");
+}
+
 TEST(DbLoader, CrashLoadConsumesStagedAccountBackedObjectBytesAndEquipsWearableItems)
 {
     ScopedObjectPrototypeTable object_prototypes;

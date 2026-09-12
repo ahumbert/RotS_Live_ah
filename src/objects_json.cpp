@@ -384,7 +384,12 @@ bool object_save_data_from_binary_impl(
         }
 
         AliasData alias;
-        alias.keyword.assign(keyword_bytes, std::find(keyword_bytes, keyword_bytes + sizeof(keyword_bytes), '\0'));
+        // The legacy field is 20 raw bytes and the in-game buffer is char[20], so a keyword
+        // that fills it carries no terminator; keep the 19 characters that can be stored.
+        char* keyword_end = std::find(keyword_bytes, keyword_bytes + sizeof(keyword_bytes), '\0');
+        if (keyword_end == keyword_bytes + sizeof(keyword_bytes))
+            keyword_end = keyword_bytes + sizeof(keyword_bytes) - 1;
+        alias.keyword.assign(keyword_bytes, keyword_end);
         alias.command.assign(bytes.data() + offset, static_cast<size_t>(command_length));
         offset += static_cast<size_t>(command_length);
         parsed_data.aliases.push_back(std::move(alias));

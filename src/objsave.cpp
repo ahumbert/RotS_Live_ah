@@ -1112,6 +1112,9 @@ int Crash_alias_load(struct char_data* ch, FILE* fp)
             RELEASE(list2);
             return FALSE;
         }
+        // The legacy field is 20 raw bytes, so a keyword that fills it arrives with
+        // no terminator of its own; keep only the characters that can be stored.
+        list2->keyword[MAX_ALIAS_KEYWORD_LENGTH] = '\0';
         if (!*(list2->keyword)) {
             RELEASE(list2);
             return TRUE;
