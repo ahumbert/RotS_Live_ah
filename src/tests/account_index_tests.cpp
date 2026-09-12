@@ -1885,6 +1885,43 @@ TEST(AccountIndexQuarantine, ReservesTheAddressOfADirectoryRecordWhoseDirectoryN
     account_index::clear();
 }
 
+TEST(AccountIndexQuarantine, DoesNotEvictAHealthyRecordAlreadyIndexedAtThatAddress)
+{
+    // A misfiled second record -- an operator's `cp -r accounts/P-T/player@example.com{,.bak}` --
+    // declares an address a healthy record already holds, and db.cpp reserves the DECLARED address
+    // so registration cannot write a fresh account over an unreachable record. Reserving it must
+    // not take the address away from the readable record at the canonical path: the walk visits the
+    // two in readdir order, and the healthy one is what the running game resolves to either way.
+    account_index::clear();
+
+    account_index::upsert(make_account("player@example.com", "alpha-admin", { "Aragorn" }),
+        "accounts/P-T/player@example.com/account.json", false);
+
+    account_index::quarantine("player@example.com",
+        "accounts/P-T/player@example.com.bak/account.json", "misfiled record");
+
+    EXPECT_FALSE(account_index::is_quarantined("player@example.com"))
+        << "the address is held by a record the server can read";
+
+    std::string record_path;
+    std::string error_message;
+    EXPECT_TRUE(account_index::find_path_by_email("player@example.com", &record_path, &error_message))
+        << error_message;
+    EXPECT_EQ(record_path, "accounts/P-T/player@example.com/account.json");
+
+    std::string owner_email;
+    EXPECT_TRUE(account_index::find_owner_email_by_character("Aragorn", &owner_email, nullptr))
+        << "the healthy record's characters must not lose their owner";
+    EXPECT_EQ(owner_email, "player@example.com");
+
+    std::string account_email;
+    EXPECT_TRUE(account_index::find_email_by_account_name("alpha-admin", &account_email, nullptr))
+        << "the healthy record's account name must stay indexed";
+    EXPECT_EQ(account_email, "player@example.com");
+
+    account_index::clear();
+}
+
 TEST(AccountIndexUpsert, WithdrawsAStrandedAccountNameOnceTheDisputeSettles)
 {
     // Keeping both records' claims while an address is disputed must not strand a key forever.

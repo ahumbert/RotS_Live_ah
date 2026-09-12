@@ -301,6 +301,21 @@ void quarantine(const std::string& normalized_email, const std::string& record_p
     if (normalized_email.empty())
         return;
 
+    // A readable record already indexed at this address keeps it. The address-shaped quarantine
+    // exists to stop registration writing a fresh account over a record the game cannot reach
+    // (db.cpp reserves the address a misfiled record DECLARES as well as the one it is filed
+    // under) -- but when a second record on disk merely declares an address a healthy record
+    // already holds, that address is not free to begin with. Overwriting the entry here withdrew
+    // the healthy record's account-name and character claims too, so its owner could no longer log
+    // in and its characters read as unlinked, until the next reboot happened to walk the two in the
+    // other readdir order -- upsert already lets a readable record displace a quarantine entry, so
+    // the outcome depended purely on which one the scan reached first. The misfiled record stays
+    // quarantined under its own key, where the operator report still shows it.
+    const auto incumbent = g_entries.find(normalized_email);
+    if (incumbent != g_entries.end() && !incumbent->second.quarantined
+        && incumbent->second.record_path != record_path)
+        return;
+
     // Withdraws the record's account-name and character claims as well as dropping its keys, so
     // setting a duplicate record aside is itself a repair: the surviving claimant of a key the two
     // disputed goes back to resolving immediately.
