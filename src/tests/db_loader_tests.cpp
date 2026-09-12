@@ -2109,6 +2109,67 @@ TEST(DbLoader, DoesNotTrustTheIndexWhenAnAccountBucketCannotBeRead)
         << "a bucket the server cannot read leaves the index incomplete, so it must not be authoritative";
 }
 
+TEST(DbLoader, BootsPastMoreMisfiledRecordsThanTheQuarantineLimit)
+{
+    // The limit is a bug detector -- "a serialization change broke every record, we shipped
+    // something" -- not a corruption tolerance. A record filed where its own email does not resolve
+    // is nobody's bug but the operator's: backing up an account directory in place makes one, and
+    // each one files TWO quarantine entries (the name it sits under, and the address it declares).
+    // Three such copies used to exceed the limit and stop the server, locking out every player over
+    // files a system administrator put there with no intention of preventing a boot.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+
+    ASSERT_EQ(mkdir("accounts", 0700), 0);
+    ASSERT_EQ(mkdir("accounts/A-E", 0700), 0);
+
+    std::string error_message;
+    for (int index = 0; index < 6; ++index) {
+        const std::string email = "a" + std::to_string(index) + "@example.com";
+        const std::string account_name = "alpha-admin" + std::to_string(index);
+        ASSERT_TRUE(account::create_account(".", account_name, email, "ValidPass1", 1700010101, nullptr, &error_message))
+            << error_message;
+        ASSERT_EQ(rename(("accounts/A-E/" + email).c_str(), ("accounts/A-E/" + email + ".bak").c_str()), 0);
+    }
+
+    account_index::clear();
+    account_index::set_root_directory(".");
+    account_index::set_enabled(true);
+
+    EXPECT_EXIT(
+        {
+            build_account_native_player_index();
+            std::exit(0);
+        },
+        ::testing::ExitedWithCode(0), "");
+
+    account_index::set_enabled(false);
+    account_index::clear();
+}
+
+TEST(DbLoader, StillRefusesToBootPastMoreUnreadableRecordsThanTheQuarantineLimit)
+{
+    // The other half of the same limit: records the server could not read or parse at all are the
+    // class it was written for, and six of them still stop the boot.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+
+    ASSERT_EQ(mkdir("accounts", 0700), 0);
+    ASSERT_EQ(mkdir("accounts/A-E", 0700), 0);
+
+    for (int index = 0; index < 6; ++index)
+        write_file("accounts/A-E/broken" + std::to_string(index) + ".json", "this is not an account record");
+
+    account_index::clear();
+    account_index::set_root_directory(".");
+    account_index::set_enabled(true);
+
+    EXPECT_EXIT(build_account_native_player_index(), ::testing::ExitedWithCode(1), "Refusing to boot");
+
+    account_index::set_enabled(false);
+    account_index::clear();
+}
+
 TEST(DbLoader, RefusesADirectoryAccountThatIsNotAtThePathItsEmailResolvesTo)
 {
     // Every path the running server composes for an account comes from

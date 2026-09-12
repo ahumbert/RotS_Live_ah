@@ -641,12 +641,24 @@ namespace {
     std::size_t g_unreadable_character_files_at_boot = 0;
     // Buckets that would not open during the walk. Each one hides an unknown number of accounts.
     std::size_t g_unreadable_buckets_at_boot = 0;
+    // Records the walk could not read or parse AT ALL -- the only class MAX_QUARANTINED_RECORDS_AT_BOOT
+    // is a detector for. Its rationale is ours: a serialization or normalize_email change breaks every
+    // record at once, so six of them means we shipped something. Everything else quarantine files --
+    // a record sitting where its own email does not resolve, a legacy flat record with no usable
+    // address, a bucket that would not open -- is an operator's doing, and a system administrator who
+    // copied an account directory in place did not intend to stop the server. Counting those against
+    // the limit locked every player out over litter: one copied directory files TWO entries, so three
+    // of them passed the limit. They stay quarantined, counted and listed; they just do not refuse the
+    // boot.
+    std::size_t g_unparseable_account_records_at_boot = 0;
 
     void visit_account_record_for_boot_index(const account::AccountRecordOnDisk& record)
     {
         if (!record.parsed) {
             if (record.unreadable_bucket)
                 ++g_unreadable_buckets_at_boot;
+            else
+                ++g_unparseable_account_records_at_boot;
             // The single most likely failure -- a corrupt account.json -- must leave per-record
             // evidence in the log, not just the aggregate count; this mirrors the message the
             // exit(1) it replaced used to print.
@@ -825,6 +837,7 @@ void build_account_native_player_index(void)
     // Per run, not per process: this is no longer only ever called once from boot_db.
     g_unreadable_character_files_at_boot = 0;
     g_unreadable_buckets_at_boot = 0;
+    g_unparseable_account_records_at_boot = 0;
 
     std::string error_message;
     if (!account::for_each_account_record_on_disk(".", visit_account_record_for_boot_index, &error_message)) {
@@ -889,9 +902,9 @@ void build_account_native_player_index(void)
         mudlog(buf, BRF, LEVEL_IMMORT, TRUE);
     }
 
-    if (quarantined > account_index::MAX_QUARANTINED_RECORDS_AT_BOOT) {
-        sprintf(buf, "Account index: %lu unusable account records exceeds the limit of %lu. Refusing to boot.",
-            static_cast<unsigned long>(quarantined),
+    if (g_unparseable_account_records_at_boot > account_index::MAX_QUARANTINED_RECORDS_AT_BOOT) {
+        sprintf(buf, "Account index: %lu unreadable account records exceeds the limit of %lu. Refusing to boot.",
+            static_cast<unsigned long>(g_unparseable_account_records_at_boot),
             static_cast<unsigned long>(account_index::MAX_QUARANTINED_RECORDS_AT_BOOT));
         log(buf);
         exit(1);

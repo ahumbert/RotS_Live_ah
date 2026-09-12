@@ -13,11 +13,16 @@
 // the file the single source of truth.
 namespace account_index {
 
-// Boot refuses to continue past this many unusable account records. The threshold is a bug
-// detector, not a corruption tolerance: the write path cannot produce a torn file, so the realistic
-// causes of an unreadable record are ours (a serialization change, a normalize_email change) and
-// they hit many records at once. One is a genuine one-off and must not take the game down; six
-// means we shipped something.
+// Boot refuses to continue past this many account records it could not READ OR PARSE. The threshold
+// is a bug detector, not a corruption tolerance: the write path cannot produce a torn file, so the
+// realistic causes of an unreadable record are ours (a serialization change, a normalize_email
+// change) and they hit many records at once. One is a genuine one-off and must not take the game
+// down; six means we shipped something.
+//
+// Only that class is counted (db.cpp's g_unparseable_account_records_at_boot), not quarantined_count():
+// the other things quarantine files -- a record filed where its own email does not resolve, a legacy
+// flat record with no usable address, a bucket that would not open -- are an operator's doing, and a
+// system administrator who copied an account directory in place did not intend to stop the server.
 static constexpr std::size_t MAX_QUARANTINED_RECORDS_AT_BOOT = 5;
 
 // One indexed record. A quarantined entry still occupies its email so that a record we could not
