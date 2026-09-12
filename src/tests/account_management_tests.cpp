@@ -388,6 +388,19 @@ TEST(AccountManagement, RejectsMalformedEmailAddresses)
     EXPECT_NE(error_message.find("recipient"), std::string::npos);
 }
 
+TEST(AccountManagement, RejectsEmailAddressesLongerThanTheStorageLayerCanCarry)
+{
+    std::string error_message;
+
+    const std::string at_the_limit = std::string(account::MAX_EMAIL_LENGTH - std::strlen("@example.com"), 'a') + "@example.com";
+    ASSERT_EQ(at_the_limit.length(), static_cast<std::size_t>(account::MAX_EMAIL_LENGTH));
+    EXPECT_TRUE(account::is_valid_email(at_the_limit, &error_message)) << error_message;
+
+    const std::string one_over = std::string(1 + account::MAX_EMAIL_LENGTH - std::strlen("@example.com"), 'a') + "@example.com";
+    EXPECT_FALSE(account::is_valid_email(one_over, &error_message));
+    EXPECT_NE(error_message.find(std::to_string(account::MAX_EMAIL_LENGTH)), std::string::npos) << error_message;
+}
+
 TEST(AccountManagement, AcceptsConservativeAccountNames)
 {
     std::string error_message;

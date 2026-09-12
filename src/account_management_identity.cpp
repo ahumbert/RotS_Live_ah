@@ -45,6 +45,14 @@ bool is_valid_account_name(const std::string& account_name, std::string* error_m
 bool is_valid_email(const std::string& email, std::string* error_message)
 {
     const std::string normalized_email = normalize_email(email);
+    // First, so an absurd address is refused for its length rather than for whichever shape rule it
+    // happens to trip. The normalized form is the one checked because that is the one stored and
+    // composed into paths -- see MAX_EMAIL_LENGTH for why a path component needs a bound at all.
+    if (normalized_email.length() > static_cast<size_t>(MAX_EMAIL_LENGTH)) {
+        set_error(error_message, "Email addresses must be " + std::to_string(MAX_EMAIL_LENGTH) + " characters or fewer.");
+        return false;
+    }
+
     const size_t at_position = normalized_email.find('@');
     if (normalized_email.empty() || at_position == std::string::npos || at_position == 0 || at_position + 1 >= normalized_email.length()) {
         set_error(error_message, "Email addresses must contain text before and after '@'.");

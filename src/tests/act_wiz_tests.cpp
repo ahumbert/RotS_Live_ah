@@ -6,6 +6,8 @@
 #include "../objects_json.h"
 #include "../structs.h"
 
+#include "AccountRecordOnDiskBuilder.h"
+
 #include <gtest/gtest.h>
 
 #include <cstdio>
@@ -975,12 +977,15 @@ char_data* make_account_native_implementor(descriptor_data* descriptor, const ch
     EXPECT_EQ(mkdir("players", 0700), 0);
     EXPECT_EQ(mkdir("players/A-E", 0700), 0);
 
-    std::string error_message;
-    EXPECT_TRUE(account::create_account(".", account_name, email, "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
-    EXPECT_TRUE(account::admin_link_character(".", account_name, "aragorn", 1700010102, nullptr, &error_message)) << error_message;
+    // Planted rather than registered. One caller needs an address longer than MAX_EMAIL_LENGTH,
+    // which create_account refuses, and planting is what an operator restoring a record by hand
+    // does anyway -- so both callers take one code path instead of branching on whether the address
+    // happens to be legal. See tests/AccountRecordOnDiskBuilder.h.
+    const std::string account_directory = rots_tests::plant_account_record_with_unvalidated_email(
+        ".", account_name, email, { "aragorn" });
 
     char_file_u stored_character = make_stored_character("aragorn", LEVEL_IMPL);
-    EXPECT_TRUE(account::write_account_character_file(".", account_name, stored_character, &error_message)) << error_message;
+    rots_tests::plant_account_character_file(account_directory, stored_character);
     std::snprintf(player_table[0].ch_file, sizeof(player_table[0].ch_file), "%s",
         account::account_character_player_path(".", account_name, "aragorn").c_str());
 

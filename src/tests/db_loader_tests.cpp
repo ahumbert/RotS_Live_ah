@@ -6,6 +6,7 @@
 #include "../exploits_json.h"
 #include "../handler.h"
 #include "../objects_json.h"
+#include "AccountRecordOnDiskBuilder.h"
 #include "../utils.h"
 
 #include <gtest/gtest.h>
@@ -936,6 +937,53 @@ TEST(DbLoader, LoadsAnAccountNativeCharacterIndexedUnderALongEmailAddress)
         ::testing::ExitedWithCode(0), "");
 }
 
+TEST(DbLoader, TheLongestPermittedEmailAndCharacterNameStillFitThePlayerIndexField)
+{
+    // MAX_EMAIL_LENGTH exists to keep this true, so assert it against the real path composer and
+    // the real index rather than re-deriving the arithmetic here. If either the cap or the field
+    // changes, this is what says whether they still agree.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+    ScopedPlayerTableReset player_table_reset;
+
+    ASSERT_EQ(mkdir("players", 0700), 0);
+    ASSERT_EQ(mkdir("players/A-E", 0700), 0);
+    ASSERT_EQ(mkdir("players/F-J", 0700), 0);
+    ASSERT_EQ(mkdir("players/K-O", 0700), 0);
+    ASSERT_EQ(mkdir("players/P-T", 0700), 0);
+    ASSERT_EQ(mkdir("players/U-Z", 0700), 0);
+    ASSERT_EQ(mkdir("accounts", 0700), 0);
+
+    const std::string longest_email = std::string(account::MAX_EMAIL_LENGTH - std::strlen("@example.com"), 'a') + "@example.com";
+    ASSERT_EQ(longest_email.length(), static_cast<std::size_t>(account::MAX_EMAIL_LENGTH));
+    const char longest_character_name[] = "abcdefghijkl";
+    ASSERT_EQ(std::strlen(longest_character_name), static_cast<std::size_t>(MAX_NAME_LENGTH));
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(".", "alpha-admin", longest_email, "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_link_character(".", "alpha-admin", longest_character_name, 1700010102, nullptr, &error_message)) << error_message;
+
+    char_file_u stored_character {};
+    std::snprintf(stored_character.name, sizeof(stored_character.name), "%s", longest_character_name);
+    stored_character.level = 25;
+    stored_character.race = 3;
+    stored_character.last_logon = 1700010200;
+    stored_character.specials2.idnum = 333;
+    stored_character.specials2.act = 0;
+    ASSERT_TRUE(account::write_account_character_file(".", "alpha-admin", stored_character, &error_message)) << error_message;
+
+    build_player_index();
+
+    ASSERT_EQ(top_of_p_table, 0);
+    EXPECT_LT(std::strlen(player_table[0].ch_file), sizeof(player_table[0].ch_file));
+    EXPECT_NE(std::string(player_table[0].ch_file).find(".character.json"), std::string::npos);
+
+    char lookup_name[] = "abcdefghijkl";
+    char_file_u loaded_character {};
+    ASSERT_EQ(load_player(lookup_name, &loaded_character), 1);
+    EXPECT_EQ(loaded_character.specials2.idnum, 333);
+}
+
 TEST(DbLoader, BuildPlayerIndexKeepsTheAccountUsableWhenOneCharacterFileIsUnreadable)
 {
     // One unreadable <name>.character.json must not lock its owner out of the whole account. The
@@ -1021,14 +1069,17 @@ TEST(DbLoader, BuildPlayerIndexFailsClosedWhenAccountNativePathDoesNotFitPlayerI
     // Derived from the buffer, not hardcoded: ch_file was widened once already, and a fixture that
     // silently stops exceeding it turns this into a test of nothing.
     const std::string long_email = std::string(sizeof(player_table[0].ch_file), 'a') + "@example.com";
-    std::string error_message;
-    ASSERT_TRUE(account::create_account(".", account_name, long_email, "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
-    ASSERT_TRUE(account::admin_link_character(".", account_name, "aragorn", 1700010102, nullptr, &error_message)) << error_message;
+    // Planted rather than registered: MAX_EMAIL_LENGTH refuses this address at create_account, so a
+    // record put on disk by hand -- restored from a backup, edited by an operator -- is the one
+    // route that can still walk an over-length path into the boot index. That is the case this
+    // guard has to survive. See tests/AccountRecordOnDiskBuilder.h.
+    const std::string account_directory = rots_tests::plant_account_record_with_unvalidated_email(
+        ".", account_name, long_email, { "aragorn" });
 
     char_file_u stored_character = make_stored_character("aragorn");
     stored_character.specials2.idnum = 222;
-    ASSERT_TRUE(account::write_account_character_file(".", account_name, stored_character, &error_message)) << error_message;
-    ASSERT_GE(account::account_character_player_path(".", account_name, "aragorn").size(), sizeof(player_table[0].ch_file))
+    rots_tests::plant_account_character_file(account_directory, stored_character);
+    ASSERT_GE((account_directory + "/aragorn.character.json").size(), sizeof(player_table[0].ch_file))
         << "Test setup must exceed the legacy player index path buffer.";
 
     EXPECT_EXIT(build_player_index(), ::testing::ExitedWithCode(1),
@@ -2182,11 +2233,13 @@ TEST(DbLoader, RefusesARenameWhoseAccountNativePathWouldNotFitThePlayerIndex)
     // scenario. Path is 31 bytes of structure + email + name, "aragorn" is 7 and "bartholomew" 11,
     // so an email of (buffer - 40) puts the two either side of the limit at any buffer width.
     const std::string long_email = std::string(sizeof(player_table[0].ch_file) - 40 - 12, 'f') + "@example.com";
-    ASSERT_TRUE(account::create_account(".", "long-account", long_email, "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
-    ASSERT_TRUE(account::admin_link_character(".", "long-account", "aragorn", 1700010102, nullptr, &error_message)) << error_message;
+    // Planted, not registered: MAX_EMAIL_LENGTH refuses this address at create_account now. See
+    // tests/AccountRecordOnDiskBuilder.h for why an on-disk record is still worth guarding.
+    const std::string account_directory = rots_tests::plant_account_record_with_unvalidated_email(
+        ".", "long-account", long_email, { "aragorn" });
 
     char_file_u stored_character = make_stored_character("aragorn");
-    ASSERT_TRUE(account::write_account_character_file(".", "long-account", stored_character, &error_message)) << error_message;
+    rots_tests::plant_account_character_file(account_directory, stored_character);
 
     const std::string old_character_path = account::account_character_player_path(".", "long-account", "aragorn");
     std::snprintf(player_table[0].ch_file, sizeof(player_table[0].ch_file), "%s", old_character_path.c_str());

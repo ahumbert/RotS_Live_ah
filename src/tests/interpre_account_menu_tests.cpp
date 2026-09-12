@@ -9,6 +9,8 @@
 #include "../structs.h"
 #include "../utils.h"
 
+#include "AccountRecordOnDiskBuilder.h"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -4597,8 +4599,10 @@ TEST(InterpreAccountMenu, IntroduceCharRejectsTooLongAccountNativeIndexPathWitho
     // Derived from the buffer rather than hardcoded: ch_file has been widened once, and a fixture
     // that quietly stops exceeding it turns this into a test of nothing.
     const std::string long_email = std::string(sizeof(player_table[0].ch_file), 'a') + "@example.com";
+    // Planted, not registered: MAX_EMAIL_LENGTH refuses this address at create_account now, and a
+    // record put on disk by hand is the route that can still produce an over-length path.
     std::string error_message;
-    ASSERT_TRUE(account::create_account(".", account_name, long_email, "ValidPass1", 1700010200, nullptr, &error_message)) << error_message;
+    rots_tests::plant_account_record_with_unvalidated_email(".", account_name, long_email, {}, 1700010200);
     const std::string account_character_path = account::account_character_player_path(".", account_name, "aragorn");
     ASSERT_GE(account_character_path.size(), sizeof(player_table[0].ch_file))
         << "Test setup must exceed the legacy player index path buffer.";
@@ -4658,16 +4662,17 @@ TEST(InterpreAccountMenu, AccountSelectionRejectsTooLongAccountNativeIndexPathWi
     // Derived from the buffer rather than hardcoded: ch_file has been widened once, and a fixture
     // that quietly stops exceeding it turns this into a test of nothing.
     const std::string long_email = std::string(sizeof(player_table[0].ch_file), 'a') + "@example.com";
+    // Planted, not registered: MAX_EMAIL_LENGTH refuses this address at create_account now. The
+    // record lists the character from the start, so the link admin_link_character used to add is
+    // already there and the object and exploit writers below still resolve through it.
     std::string error_message;
-    account::AccountData account_data;
-    ASSERT_TRUE(account::create_account(".", account_name, long_email, "ValidPass1", 1700010200, &account_data, &error_message)) << error_message;
+    rots_tests::plant_account_record_with_unvalidated_email(".", account_name, long_email, { "aragorn" }, 1700010200);
 
     char_file_u stored_character = make_stored_character("aragorn", 1, RACE_HUMAN);
     stored_character.specials2.idnum = 4242;
     ASSERT_TRUE(account::write_account_character_file(".", account_name, stored_character, &error_message)) << error_message;
     ASSERT_TRUE(account::write_default_account_object_file(".", account_name, "aragorn", &error_message)) << error_message;
     ASSERT_TRUE(account::write_default_account_exploit_file(".", account_name, "aragorn", &error_message)) << error_message;
-    ASSERT_TRUE(account::admin_link_character(".", account_name, "aragorn", 1700010201, &account_data, &error_message)) << error_message;
     const std::string account_character_path = account::account_character_player_path(".", account_name, "aragorn");
     ASSERT_GE(account_character_path.size(), sizeof(player_table[0].ch_file))
         << "Test setup must exceed the legacy player index path buffer.";

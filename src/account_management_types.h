@@ -32,6 +32,15 @@ static constexpr int ACCOUNT_SCHEMA_VERSION = 1;
 static constexpr int MIN_PASSWORD_LENGTH = 8;
 static constexpr int MIN_ACCOUNT_NAME_LENGTH = 3;
 static constexpr int MAX_ACCOUNT_NAME_LENGTH = 20;
+// The address is a path component: an account-native character file lives at
+// "<root>/accounts/<bucket>/<email>/<name>.character.json", 31 bytes of fixed structure plus the
+// address plus the character name, and player_index_element::ch_file has to hold the result. At
+// ch_file[160] and MAX_NAME_LENGTH 12 the arithmetic permits 116; 100 leaves headroom for both to
+// move without the two silently disagreeing, and is over three times the longest address in live
+// data. Nothing else bounded this: is_valid_email checked shape and characters only, and the prompt
+// accepts up to MAX_INPUT_LENGTH. The fixture that fails if this number and that field stop
+// agreeing is DbLoader.TheLongestPermittedEmailAndCharacterNameStillFitThePlayerIndexField.
+static constexpr int MAX_EMAIL_LENGTH = 100;
 static constexpr long EMAIL_VERIFICATION_WINDOW_SECONDS = 15 * 60;
 static constexpr long EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS = 60;
 static constexpr int MAX_EMAIL_VERIFICATION_ATTEMPTS = 5;
