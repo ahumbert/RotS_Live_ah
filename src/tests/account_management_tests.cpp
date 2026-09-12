@@ -2939,6 +2939,51 @@ TEST(AccountManagement, MigrationRestoresRetiredFilesWhenExploitRetirementFails)
     EXPECT_FALSE(account::account_exploit_file_exists(temp_directory.path(), "alpha-admin", "aragorn", &error_message));
 }
 
+TEST(AccountManagement, MigrationKeepsItsOutputsWhenItCannotPutTheLegacyOriginalsBack)
+{
+    // The other way a conversion could end with no copy of the character. When retirement fails
+    // part-way it restores the legacy files it had already deleted -- but restore_retired_legacy_files
+    // only appends to the error string, so a restore that did not work reported nothing, and the
+    // caller went on to delete the account-native files anyway.
+    TemporaryDirectory temp_directory;
+    const std::string root = temp_directory.path();
+    ASSERT_EQ(mkdir((root + "/players").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((root + "/players/A-E").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((root + "/plrobjs").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((root + "/plrobjs/A-E").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((root + "/exploits").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((root + "/exploits/A-E").c_str(), 0700), 0);
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(root, "alpha-admin", "player@example.com", "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
+
+    const std::string player_path = account::legacy_player_file_path(root, "aragorn");
+    const std::string object_path = account::legacy_object_file_path(root, "aragorn");
+    const std::string exploits_bucket = root + "/exploits/A-E";
+    write_valid_legacy_player_file(root, make_stored_character("aragorn"));
+    write_text_file(object_path, make_valid_object_bytes());
+    write_text_file(account::legacy_exploits_file_path(root, "aragorn"), make_valid_exploit_bytes());
+
+    // Retirement gets as far as the exploit file and fails there, exactly as
+    // MigrationRestoresRetiredFilesWhenExploitRetirementFails arranges it.
+    ASSERT_EQ(chmod(exploits_bucket.c_str(), 0500), 0);
+    // And the player file cannot be put back: write_snapshot_bytes stages through "<path>.tmp", and
+    // a non-empty directory sitting there means it can neither be opened nor renamed over.
+    ASSERT_EQ(mkdir((player_path + ".tmp").c_str(), 0700), 0);
+    write_text_file(player_path + ".tmp/occupant", "not empty");
+
+    account::CharacterMigrationData migration;
+    EXPECT_FALSE(account::migrate_legacy_character_by_name(root, "alpha-admin", "aragorn", 1700010102, &migration, &error_message));
+
+    ASSERT_EQ(chmod(exploits_bucket.c_str(), 0700), 0);
+
+    const bool legacy_survives = access(player_path.c_str(), F_OK) == 0;
+    const bool account_native_survives = account::account_character_file_exists(root, "alpha-admin", "aragorn", &error_message);
+    EXPECT_TRUE(legacy_survives || account_native_survives)
+        << "a restore that did not work must not be followed by deleting the only remaining copy: "
+        << "neither " << player_path << " nor the account-native character file is left";
+}
+
 TEST(AccountManagement, MigrationWritesDefaultAccountNativeExploitFileWhenLegacyExploitDataIsMissing)
 {
     TemporaryDirectory temp_directory;
@@ -4884,6 +4929,60 @@ TEST(AccountManagement, StillConvertsACharacterThatSurvivesTheRoundTrip)
         "ValidPass1", "aragorn", 1700012223, &linked_account, &migration, &error_message))
         << error_message;
     EXPECT_TRUE(account::account_has_character(linked_account, "aragorn"));
+}
+
+TEST(AccountManagement, AFailedConversionNeverLeavesACharacterWithNoCopyAtAll)
+{
+    // The conversion deletes the legacy originals and then retires its own transitional
+    // <name>.migration.json. If that last step fails, the failure path used to delete the
+    // account-native files it had just written -- and the legacy files were already gone, so the
+    // character existed nowhere. Whatever else a failed conversion does, it must never end with no
+    // copy of the character on disk.
+    TemporaryDirectory temp_directory;
+    const std::string root = temp_directory.path();
+    ASSERT_EQ(mkdir((root + "/players").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((root + "/players/A-E").c_str(), 0700), 0);
+    write_valid_legacy_player_file(root, make_stored_character("aragorn"));
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(root, "alpha-admin", "player@example.com",
+        "ValidPass1", 1700012222, nullptr, &error_message))
+        << error_message;
+    ASSERT_TRUE(account::admin_verify_email(root, "alpha-admin", "VerifierAdmin",
+        1700012222, nullptr, &error_message))
+        << error_message;
+
+    // A non-empty directory where the transitional file goes: std::remove() answers ENOTEMPTY, while
+    // every sibling file in the same directory still deletes normally. An interrupted conversion or
+    // a half-extracted backup leaves artifacts at exactly this path.
+    const std::string snapshot_path = account::account_character_snapshot_path(root, "alpha-admin", "aragorn");
+    ASSERT_EQ(mkdir(snapshot_path.c_str(), 0700), 0);
+    write_text_file(snapshot_path + "/occupant", "not empty");
+
+    const std::string legacy_player_path = account::legacy_player_file_path(root, "aragorn");
+    const std::string account_character_path = account::account_character_player_path(root, "alpha-admin", "aragorn");
+    ASSERT_EQ(access(legacy_player_path.c_str(), F_OK), 0) << "fixture must start with a legacy character on disk";
+
+    account::AccountData linked_account;
+    account::CharacterMigrationData migration;
+    const bool converted = account::link_and_migrate_character(root, "alpha-admin",
+        "ValidPass1", "aragorn", 1700012223, &linked_account, &migration, &error_message);
+
+    const bool legacy_survives = access(legacy_player_path.c_str(), F_OK) == 0;
+    const bool account_native_survives = access(account_character_path.c_str(), F_OK) == 0;
+    ASSERT_TRUE(legacy_survives || account_native_survives)
+        << "the conversion " << (converted ? "reported success" : "failed")
+        << " and left no copy of the character: neither " << legacy_player_path
+        << " nor " << account_character_path;
+
+    // And the conversion is not merely survivable, it is done: the legacy originals were retired
+    // before this step, so there is nothing left to abandon. A leftover transitional file is
+    // reported and stepped over, not treated as a reason to undo work that already happened.
+    EXPECT_TRUE(converted) << error_message;
+    EXPECT_TRUE(account_native_survives) << account_character_path;
+    EXPECT_FALSE(legacy_survives) << "the legacy original is retired by a conversion that succeeded";
+    EXPECT_TRUE(account::account_has_character(linked_account, "aragorn"))
+        << "a converted character must be linked to the account, not left orphaned beside it";
 }
 
 TEST(AccountManagement, RefusesRegistrationForAnAddressWhoseIndexedRecordWillNotRead)

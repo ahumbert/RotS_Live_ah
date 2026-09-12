@@ -555,6 +555,23 @@ namespace {
         std::remove(account_character_snapshot_path(root_directory, account_name, character_name).c_str());
     }
 
+    // True when every legacy file is exactly as the conversion found it -- present if the snapshot
+    // read one, absent if it did not.
+    //
+    // This is the condition that makes deleting the account-native outputs a ROLLBACK rather than a
+    // deletion. Undoing a conversion that never took hold is safe because the originals are still
+    // there; the moment they are not, those outputs are the only copy of the character and removing
+    // them loses it outright. The two ways that happened: a failure AFTER
+    // retire_legacy_character_files_after_migration had already deleted the originals, and a failure
+    // DURING it whose restore did not work -- restore_retired_legacy_files only appends to the error
+    // string, it never reports that the character is still missing.
+    bool legacy_originals_are_intact(const CharacterMigrationData& snapshot_data, const std::string& player_file_path, const std::string& object_file_path, const std::string& exploits_file_path)
+    {
+        return path_exists(player_file_path) == snapshot_data.player_file.present
+            && path_exists(object_file_path) == snapshot_data.object_file.present
+            && path_exists(exploits_file_path) == snapshot_data.exploits_file.present;
+    }
+
     // --- Conversion loss guard --------------------------------------------------------------------
     //
     // A legacy character is converted to JSON exactly once, and the legacy file is deleted straight
@@ -707,26 +724,45 @@ namespace {
         // add_character_to_account, so the account is not touched either. The player is told it
         // failed and can convert later once the cause is fixed -- far better than a converted
         // character that is quietly missing a field with the original already deleted.
+        // Every abandonment below goes through here rather than calling cleanup directly. Rolling
+        // back means putting the character back where it was, and that is only what this does while
+        // the originals are still on disk -- see legacy_originals_are_intact.
+        const auto roll_back_account_native_outputs = [&]() {
+            if (legacy_originals_are_intact(snapshot_data, player_file_path, object_file_path, exploits_file_path)) {
+                cleanup_account_native_migration_outputs(root_directory, account_name, character_name);
+                return;
+            }
+
+            std::fprintf(stderr, "SYSERR: Conversion of '%s' failed after its legacy files were retired; keeping the account-native files at '%s' because they are now the only copy of the character.\n",
+                character_name.c_str(), account_character_directory(root_directory, account_name, character_name).c_str());
+        };
+
         if (!verify_converted_character_file(root_directory, account_name, character_name, converted_source, error_message)) {
-            cleanup_account_native_migration_outputs(root_directory, account_name, character_name);
+            roll_back_account_native_outputs();
             return false;
         }
         if (!hydrate_account_native_object_file_from_migration(root_directory, account_name, character_name, snapshot_data, error_message)) {
-            cleanup_account_native_migration_outputs(root_directory, account_name, character_name);
+            roll_back_account_native_outputs();
             return false;
         }
         if (!hydrate_account_native_exploit_file_from_migration(root_directory, account_name, character_name, snapshot_data, error_message)) {
-            cleanup_account_native_migration_outputs(root_directory, account_name, character_name);
+            roll_back_account_native_outputs();
             return false;
         }
         if (!retire_legacy_character_files_after_migration(player_file_path, stale_flat_player_file_path, object_file_path, exploits_file_path, snapshot_data, error_message)) {
-            cleanup_account_native_migration_outputs(root_directory, account_name, character_name);
+            roll_back_account_native_outputs();
             return false;
         }
 
-        if (!retire_character_migration_snapshot_file(root_directory, account_name, character_name, error_message)) {
-            cleanup_account_native_migration_outputs(root_directory, account_name, character_name);
-            return false;
+        // Deliberately not a failure. The legacy originals are gone by now, so the conversion has
+        // happened whatever becomes of this transitional file -- a leftover <name>.migration.json is
+        // litter, and nothing reads it unless a later conversion asks for it by name. Failing here
+        // used to abandon a conversion that had already succeeded and take the only copy of the
+        // character with it.
+        std::string snapshot_retirement_error;
+        if (!retire_character_migration_snapshot_file(root_directory, account_name, character_name, &snapshot_retirement_error)) {
+            std::fprintf(stderr, "SYSERR: Converted '%s' but could not retire its transitional migration file: %s\n",
+                character_name.c_str(), snapshot_retirement_error.c_str());
         }
 
         if (migration)
