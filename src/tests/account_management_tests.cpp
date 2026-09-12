@@ -1526,6 +1526,40 @@ TEST(AccountManagement, BuildsAccountLinkedCharacterSnapshotPaths)
         "/game/lib/accounts/P-T/player@example.com/aragorn.exploits.json");
 }
 
+TEST(AccountManagement, RefusesToWriteACharacterFileItCannotReadBack)
+{
+    // The write validates struct -> CharacterData -> struct and never parses the TEXT it produces.
+    // Skills are keyed by name and the skill table carries two entries with the same name, so a
+    // character with values in both emits the same key twice and the reader refuses the whole file.
+    // Written over the previous save, that is the character's only copy replaced by one nothing can
+    // load -- and the player is told the character does not exist.
+    TemporaryDirectory temp_directory;
+    std::string error_message;
+
+    ASSERT_TRUE(account::create_account(temp_directory.path(), "alpha-admin", "player@example.com", "ValidPass1", 1700007776, nullptr, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_link_character(temp_directory.path(), "alpha-admin", "aragorn", 1700007777, nullptr, &error_message)) << error_message;
+
+    const char_file_u original = make_stored_character("aragorn");
+    ASSERT_TRUE(account::write_account_character_file(temp_directory.path(), "alpha-admin", original, &error_message)) << error_message;
+
+    // Every skill practised, rather than naming the duplicated pair by index: the table is world
+    // data and the pair moves.
+    char_file_u every_skill = original;
+    every_skill.level = 50;
+    for (int skill = 0; skill < MAX_SKILLS; ++skill)
+        every_skill.skills[skill] = 1;
+
+    EXPECT_FALSE(account::write_account_character_file(temp_directory.path(), "alpha-admin", every_skill, &error_message))
+        << "a file the reader will refuse must not replace the character's only copy";
+
+    char_file_u loaded {};
+    std::string read_error;
+    ASSERT_TRUE(account::read_account_character_file(temp_directory.path(), "alpha-admin", "aragorn", &loaded, &read_error))
+        << "the character that was on disk must still load: " << read_error;
+    EXPECT_EQ(loaded.level, original.level)
+        << "and it must still be the character that was written, not the one that was refused";
+}
+
 TEST(AccountManagement, WritesAndReadsAccountNativeCharacterFile)
 {
     TemporaryDirectory temp_directory;

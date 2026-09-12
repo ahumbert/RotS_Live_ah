@@ -34,6 +34,24 @@ bool write_account_character_file(const std::string& root_directory, const std::
 
     const std::string final_path = resolved_character_path(account, root_directory, stored_character.name);
     const std::string json = character_json::serialize_character_to_json(character_data);
+
+    // The struct round trip above proves the DATA survives; it says nothing about the TEXT, and the
+    // two can disagree. Skills are keyed by name and the skill table carries two entries under the
+    // same name, so a character with values in both emits that key twice and the reader refuses the
+    // whole file. Nothing below can put the previous file back: the write replaces the character's
+    // only copy, and the next login is told the character does not exist. Migration verifies its
+    // conversions for exactly this reason; the save path did not.
+    character_json::CharacterData readback;
+    std::string readback_error;
+    if (!character_json::deserialize_character_from_json(json, &readback, &readback_error)) {
+        // Worded to match the migration guard's refusal (account_management_internal.cpp): the two
+        // catch the same thing at different moments, and the conversion path's own test pins this
+        // phrase.
+        set_error(error_message, "Character file for '" + std::string(stored_character.name)
+                + "' was not written: it cannot be read back (" + readback_error + ").");
+        return false;
+    }
+
     if (!write_text_file_atomically(final_path, json, error_message))
         return false;
 
