@@ -1252,10 +1252,22 @@ bool admin_rename_linked_character(const std::string& root_directory, const std:
     updated_account.updated_at = updated_at;
 
     // The write is last, so a failure here leaves the account describing the state the files were
-    // just restored to rather than a state that never existed on disk.
-    if (!write_account_file(root_directory, updated_account, error_message)) {
-        undo_staged_moves();
-        return false;
+    // just restored to rather than a state that never existed on disk -- but only while nothing has
+    // been committed. Once account.json is at its final path it names the moved files, and undoing
+    // the moves then produces the "[ ?? ???]" roster row this function exists to prevent, reported
+    // to the immortal as an error. What can still fail after the commit is retiring a stale copy,
+    // which leaves litter, not a broken character.
+    bool record_committed = false;
+    std::string write_error;
+    if (!write_account_file(root_directory, updated_account, &write_error, &record_committed)) {
+        if (!record_committed) {
+            set_error(error_message, write_error);
+            undo_staged_moves();
+            return false;
+        }
+
+        std::fprintf(stderr, "SYSERR: Renamed character '%s' to '%s' on account '%s', but the account write did not finish cleanly: %s\n",
+            normalized_character_name.c_str(), normalized_new_name.c_str(), account_name.c_str(), write_error.c_str());
     }
 
     if (account)
@@ -1508,17 +1520,31 @@ bool admin_delete_linked_character(const std::string& root_directory, const std:
         updated_account.character_links.end());
     updated_account.updated_at = updated_at;
 
-    if (!write_account_file(root_directory, updated_account, error_message)) {
-        restore_staged_removals();
-        return false;
+    // Restoring the staged files is right only while nothing has been committed. Once account.json
+    // is at its final path it no longer lists the character, so putting its files back produces a
+    // record and a set of files that disagree -- and db.cpp, reading the false as "nothing
+    // happened", removes the players/ZZZ archive it made for exactly this recovery.
+    bool record_committed = false;
+    std::string write_error;
+    if (!write_account_file(root_directory, updated_account, &write_error, &record_committed)) {
+        if (!record_committed) {
+            set_error(error_message, write_error);
+            restore_staged_removals();
+            return false;
+        }
+
+        std::fprintf(stderr, "SYSERR: Deleted character '%s' from account '%s', but the account write did not finish cleanly: %s\n",
+            normalized_character_name.c_str(), account_name.c_str(), write_error.c_str());
     }
 
+    // Past the commit the character is deleted whatever happens here: a staged copy that will not
+    // unlink is litter beside the account, and reporting it as a failed deletion costs the archive.
     for (const StagedRemoval& staged_removal : staged_removals) {
         if (!staged_removal.existed)
             continue;
         if (std::remove(staged_removal.staged_path.c_str()) != 0 && errno != ENOENT) {
-            set_error(error_message, std::string("Failed to remove staged ") + staged_removal.label + " '" + staged_removal.staged_path + "': " + std::strerror(errno));
-            return false;
+            std::fprintf(stderr, "SYSERR: Failed to remove staged %s '%s': %s\n",
+                staged_removal.label, staged_removal.staged_path.c_str(), std::strerror(errno));
         }
     }
 

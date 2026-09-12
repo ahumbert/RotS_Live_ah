@@ -40,7 +40,12 @@ std::string account_character_exploits_path(const std::string& root_directory, c
 std::string serialize_account_to_json(const AccountData& account);
 bool deserialize_account_from_json(const std::string& json, AccountData* account, std::string* error_message = nullptr);
 
-bool write_account_file(const std::string& root_directory, const AccountData& account, std::string* error_message = nullptr);
+// record_committed, when given, says whether account.json reached its final path before the call
+// returned. Everything after that rename -- the cache flush, the index upsert, retiring a stale or
+// legacy copy -- can still fail, and a caller that treats such a failure as "nothing happened" and
+// undoes its own file moves leaves the committed record describing a state no longer on disk.
+bool write_account_file(const std::string& root_directory, const AccountData& account, std::string* error_message = nullptr,
+    bool* record_committed = nullptr);
 bool read_account_file(const std::string& root_directory, const std::string& account_name, AccountData* account, std::string* error_message = nullptr);
 // Uncached on-disk read (the real scan). read_account_file delegates here when the cache is disabled,
 // and it is the cache's backing resolver on a miss. Call directly to bypass the cache.

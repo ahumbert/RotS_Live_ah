@@ -5115,6 +5115,125 @@ TEST(AccountManagement, RenamingALinkedCharacterMovesItsFilesAndRewritesTheAccou
     EXPECT_TRUE(account::account_has_character(reread, "newname")) << "the account must list the new name";
 }
 
+namespace {
+
+// A legacy flat record this account's write would retire, readable and this account's own (so the
+// pre-commit guard passes it), sitting in a bucket that has lost its write bit -- so the retirement
+// std::remove fails with EACCES AFTER account.json has been renamed into place. Returns the bucket
+// so the caller can restore its mode.
+std::string plant_unretirable_legacy_record(const std::string& root, const std::string& account_name,
+    const std::string& email)
+{
+    const std::string legacy_bucket = root + "/accounts/" + account::account_bucket_for_name(account_name);
+    mkdir(legacy_bucket.c_str(), 0700);
+    const std::string account_json = root + "/accounts/" + account::account_bucket_for_name(email)
+        + "/" + email + "/account.json";
+    write_text_file(legacy_bucket + "/" + account_name + ".json", read_file_contents(account_json));
+    EXPECT_EQ(chmod(legacy_bucket.c_str(), 0500), 0);
+    return legacy_bucket;
+}
+
+} // namespace
+
+TEST(AccountManagement, RenamingALinkedCharacterStandsWhenRetiringALegacyRecordFails)
+{
+    // The account write commits -- account.json is renamed into place, the cache is flushed and the
+    // index re-derived -- and only then can a retirement std::remove fail. Reported as a failed
+    // rename, the caller undid the file moves, so account.json and the index named the character
+    // "newname" while its files sat at "oldname": the "[ ?? ???]" roster row this function exists
+    // to prevent, handed to the immortal as an error. A stale legacy file left behind is litter.
+    TemporaryDirectory temp_directory;
+    account::AccountData account_data;
+    std::string error_message;
+
+    ASSERT_TRUE(account::create_account_for_email(temp_directory.path(), "player@example.com",
+        "ValidPass1", 1700006300, &account_data, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_link_character(temp_directory.path(), account_data.account_name,
+        "oldname", 1700006301, &account_data, &error_message)) << error_message;
+    write_linked_character_files(temp_directory.path(), account_data.account_name, "oldname", "payload");
+
+    const std::string legacy_bucket = plant_unretirable_legacy_record(temp_directory.path(),
+        account_data.account_name, "player@example.com");
+
+    const bool renamed = account::admin_rename_linked_character(temp_directory.path(),
+        account_data.account_name, "oldname", "newname", 1700006302, &account_data, &error_message);
+    chmod(legacy_bucket.c_str(), 0700);
+
+    EXPECT_TRUE(renamed) << error_message;
+
+    const std::string new_character = account::account_character_player_path(temp_directory.path(), account_data.account_name, "newname");
+    EXPECT_TRUE(path_is_present(new_character)) << "the files must stay where the committed account record says they are";
+    EXPECT_EQ(read_whole(new_character), "payload-character");
+    EXPECT_FALSE(path_is_present(account::account_character_player_path(temp_directory.path(), account_data.account_name, "oldname")));
+
+    account::AccountData reread;
+    ASSERT_TRUE(account::read_account_file(temp_directory.path(), account_data.account_name, &reread, &error_message)) << error_message;
+    EXPECT_TRUE(account::account_has_character(reread, "newname"));
+}
+
+TEST(AccountManagement, DeletingALinkedCharacterStandsWhenRetiringALegacyRecordFails)
+{
+    // Same post-commit bailout on the deletion path, where the undo is worse: the character files
+    // were restored while account.json no longer listed the character, and db.cpp -- reading the
+    // false as "nothing happened" -- deleted the players/ZZZ archive it had just made for exactly
+    // this recovery.
+    TemporaryDirectory temp_directory;
+    account::AccountData account_data;
+    std::string error_message;
+
+    ASSERT_TRUE(account::create_account_for_email(temp_directory.path(), "player@example.com",
+        "ValidPass1", 1700006400, &account_data, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_link_character(temp_directory.path(), account_data.account_name,
+        "oldname", 1700006401, &account_data, &error_message)) << error_message;
+    write_linked_character_files(temp_directory.path(), account_data.account_name, "oldname", "payload");
+
+    const std::string legacy_bucket = plant_unretirable_legacy_record(temp_directory.path(),
+        account_data.account_name, "player@example.com");
+
+    const bool deleted = account::admin_delete_linked_character(temp_directory.path(),
+        account_data.account_name, "oldname", 1700006402, &account_data, &error_message);
+    chmod(legacy_bucket.c_str(), 0700);
+
+    EXPECT_TRUE(deleted) << error_message;
+    EXPECT_FALSE(path_is_present(account::account_character_player_path(temp_directory.path(), account_data.account_name, "oldname")))
+        << "the character file must not be restored under a record that no longer lists it";
+
+    account::AccountData reread;
+    ASSERT_TRUE(account::read_account_file(temp_directory.path(), account_data.account_name, &reread, &error_message)) << error_message;
+    EXPECT_FALSE(account::account_has_character(reread, "oldname"));
+}
+
+TEST(AccountManagement, DeletingALinkedCharacterStandsWhenAStagedFileCannotBeRemoved)
+{
+    // The staged copies are removed last, after the account write has committed. A staged path that
+    // will not unlink -- here a stray directory left where the object file belongs -- was reported
+    // as a failed deletion, and db.cpp then removed the players/ZZZ archive. The character is
+    // deleted either way; the staged leftover is litter.
+    TemporaryDirectory temp_directory;
+    account::AccountData account_data;
+    std::string error_message;
+
+    ASSERT_TRUE(account::create_account_for_email(temp_directory.path(), "player@example.com",
+        "ValidPass1", 1700006500, &account_data, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_link_character(temp_directory.path(), account_data.account_name,
+        "oldname", 1700006501, &account_data, &error_message)) << error_message;
+    write_linked_character_files(temp_directory.path(), account_data.account_name, "oldname", "payload");
+
+    const std::string object_path = account::account_character_object_path(temp_directory.path(), account_data.account_name, "oldname");
+    ASSERT_EQ(std::remove(object_path.c_str()), 0);
+    ASSERT_EQ(mkdir(object_path.c_str(), 0700), 0);
+    write_text_file(object_path + "/stray", "stray");
+
+    EXPECT_TRUE(account::admin_delete_linked_character(temp_directory.path(),
+        account_data.account_name, "oldname", 1700006502, &account_data, &error_message))
+        << error_message;
+    EXPECT_FALSE(path_is_present(account::account_character_player_path(temp_directory.path(), account_data.account_name, "oldname")));
+
+    account::AccountData reread;
+    ASSERT_TRUE(account::read_account_file(temp_directory.path(), account_data.account_name, &reread, &error_message)) << error_message;
+    EXPECT_FALSE(account::account_has_character(reread, "oldname"));
+}
+
 TEST(AccountManagement, RenamingALinkedCharacterOntoAnExistingNameChangesNothing)
 {
     TemporaryDirectory temp_directory;

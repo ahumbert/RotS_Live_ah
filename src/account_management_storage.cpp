@@ -167,7 +167,8 @@ bool deserialize_account_from_json(const std::string& json, AccountData* account
     return true;
 }
 
-bool write_account_file(const std::string& root_directory, const AccountData& account, std::string* error_message)
+bool write_account_file(const std::string& root_directory, const AccountData& account, std::string* error_message,
+    bool* record_committed)
 {
     if (!validate_identifier_for_path(account.account_name, "Account name", error_message))
         return false;
@@ -305,6 +306,11 @@ bool write_account_file(const std::string& root_directory, const AccountData& ac
         set_error(error_message, "Failed to move temporary account file into place: " + std::string(std::strerror(errno)));
         return false;
     }
+
+    // The record is on disk from here on. Every step below can still fail, and the caller must not
+    // undo its own half of the operation when one does.
+    if (record_committed != nullptr)
+        *record_committed = true;
 
     // The record is at its final path from here on, so the cache and the index must describe it
     // BEFORE the retirement steps below -- each of those can fail and return, and returning with the
