@@ -1,4 +1,5 @@
 #include "../account_index.h"
+#include "../account_errors.h"
 #include "../account_management.h"
 #include "../exploits_json.h"
 #include "../objects_json.h"
@@ -1549,8 +1550,18 @@ TEST(AccountManagement, RefusesToWriteACharacterFileItCannotReadBack)
     for (int skill = 0; skill < MAX_SKILLS; ++skill)
         every_skill.skills[skill] = 1;
 
+    account_errors::clear();
     EXPECT_FALSE(account::write_account_character_file(temp_directory.path(), "alpha-admin", every_skill, &error_message))
         << "a file the reader will refuse must not replace the character's only copy";
+
+    // A refused save is the most dangerous thing on the list: the player keeps playing and their
+    // progress is not being written. It must be answerable in game, not only in the log.
+    const std::vector<account_errors::Entry> recorded = account_errors::recent(10);
+    ASSERT_EQ(recorded.size(), 1u);
+    EXPECT_EQ(recorded[0].source, account_errors::Source::Save);
+    EXPECT_EQ(recorded[0].character, "aragorn");
+    EXPECT_EQ(recorded[0].account, "alpha-admin");
+    account_errors::clear();
 
     char_file_u loaded {};
     std::string read_error;

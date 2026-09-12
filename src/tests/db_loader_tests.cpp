@@ -1,3 +1,4 @@
+#include "../account_errors.h"
 #include "../account_index.h"
 #include "../account_management.h"
 #include "../char_utils.h"
@@ -1027,10 +1028,21 @@ TEST(DbLoader, BuildPlayerIndexKeepsTheAccountUsableWhenOneCharacterFileIsUnread
     // Cleared last, so what the boot walk itself produced is what the assertions below observe
     // rather than the upserts create_account/admin_link_character did during setup.
     account_index::clear();
+    account_errors::clear();
     build_player_index();
 
     EXPECT_EQ(account_index::quarantined_count(), 0u)
         << "a bad character file is not the ACCOUNT failing to parse";
+
+    // The character is silently absent from the player index, and its owner is told only that it
+    // does not exist. The boot line naming it scrolls away; this is what an immortal can still ask.
+    const std::vector<account_errors::Entry> recorded = account_errors::recent(10);
+    ASSERT_EQ(recorded.size(), 1u) << "exactly the one character that could not be read";
+    EXPECT_EQ(recorded[0].source, account_errors::Source::Boot);
+    EXPECT_EQ(recorded[0].character, "gimli");
+    EXPECT_EQ(recorded[0].account, "twochar");
+    EXPECT_FALSE(recorded[0].reason.empty());
+    account_errors::clear();
 
     std::string record_path;
     EXPECT_TRUE(account_index::find_path_by_email("player@example.com", &record_path, nullptr))

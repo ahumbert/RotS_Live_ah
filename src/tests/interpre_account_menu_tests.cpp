@@ -1,3 +1,4 @@
+#include "../account_errors.h"
 #include "../account_management.h"
 #include "../db.h"
 #include "../handler.h"
@@ -2812,6 +2813,7 @@ TEST(InterpreAccountMenu, AccountMenuLinkFailureIsLoggedAndLeavesTheLegacyFilesI
     const std::string account_directory = "accounts/P-T/player@example.com";
     ASSERT_EQ(chmod(account_directory.c_str(), 0500), 0);
 
+    account_errors::clear();
     testing::internal::CaptureStderr();
     char password_choice[] = "LegacyPw1";
     nanny(&descriptor, password_choice);
@@ -2819,10 +2821,16 @@ TEST(InterpreAccountMenu, AccountMenuLinkFailureIsLoggedAndLeavesTheLegacyFilesI
     ASSERT_EQ(chmod(account_directory.c_str(), 0700), 0);
 
     EXPECT_EQ(descriptor.connected, CON_ACCTMENU);
-    EXPECT_NE(logged.find("aragorn"), std::string::npos)
-        << "a failed conversion must name the character in the log; logged: " << logged;
-    EXPECT_NE(logged.find("acct"), std::string::npos)
-        << "and the account it was being added to; logged: " << logged;
+    EXPECT_NE(logged.find("ACCTERR migration acct=acct char=aragorn:"), std::string::npos)
+        << "a failed conversion must name the account and the character; logged: " << logged;
+
+    // And be answerable afterwards, which is the whole point: the player reports this hours later.
+    const std::vector<account_errors::Entry> recorded = account_errors::recent(10);
+    ASSERT_EQ(recorded.size(), 1u);
+    EXPECT_EQ(recorded[0].source, account_errors::Source::Migration);
+    EXPECT_EQ(recorded[0].character, "aragorn");
+    EXPECT_EQ(recorded[0].account, "acct");
+    account_errors::clear();
 
     struct stat legacy_info { };
     EXPECT_EQ(stat(legacy_player_path.c_str(), &legacy_info), 0)

@@ -27,6 +27,7 @@
 
 #include "account_cache.h"
 #include "account_index.h"
+#include "account_errors.h"
 #include "account_management.h"
 #include "big_brother.h"
 #include "char_utils.h"
@@ -773,6 +774,10 @@ namespace {
                     sprintf(buf, "Failed to inspect account-native character file '%s': %s (account '%s' stays usable; this character is not in the player index)",
                         character_path.c_str(), inspect_error.c_str(), record.record_path.c_str());
                     log(buf);
+                    // The line above carries the path and the caveat; this carries the two names, so
+                    // the character can be asked about by name once boot has scrolled past.
+                    account_errors::record(account_errors::Source::Boot, record.account.account_name,
+                        character_name, inspect_error);
                     ++g_unreadable_character_files_at_boot;
                     continue;
                 }
@@ -783,6 +788,8 @@ namespace {
                 sprintf(buf, "Failed to read account-native character file '%s': %s (account '%s' stays usable; this character is not in the player index)",
                     character_path.c_str(), read_error.c_str(), record.record_path.c_str());
                 log(buf);
+                account_errors::record(account_errors::Source::Boot, record.account.account_name,
+                    character_name, read_error);
                 ++g_unreadable_character_files_at_boot;
                 continue;
             }

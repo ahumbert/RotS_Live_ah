@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "account_index.h"
+#include "account_errors.h"
 #include "account_management.h"
 #include "account_management_storage.h"
 #include "char_utils.h"
@@ -3182,7 +3183,66 @@ ACMD(do_account)
     half_chop(buf, account_identifier, value);
 
     if (!*subcommand) {
-        send_to_char("Usage: account <show|verify|unverify|block|unblock|passwd|addchar|migratechar|unlockselect|index> <email-or-account> [value]\n\r", ch);
+        send_to_char("Usage: account <show|verify|unverify|block|unblock|passwd|addchar|migratechar|unlockselect|index|errors> <email-or-account> [value]\n\r", ch);
+        return;
+    }
+
+    if (!str_cmp(subcommand, "errors")) {
+        char requested_rows[MAX_INPUT_LENGTH];
+        half_chop(buf, requested_rows, value);
+
+        // Twenty is what fits on a screen without paging; the cap is the ring itself, so asking for
+        // more than is held can never be a way to ask for more work than exists.
+        std::size_t rows = 20;
+        if (*requested_rows) {
+            const int asked = atoi(requested_rows);
+            if (asked <= 0) {
+                send_to_char("Usage: account errors [rows]\n\r", ch);
+                return;
+            }
+            rows = static_cast<std::size_t>(asked);
+        }
+        if (rows > account_errors::MAX_RECORDED_ERRORS)
+            rows = account_errors::MAX_RECORDED_ERRORS;
+
+        const std::size_t recorded = account_errors::size();
+        if (recorded == 0) {
+            // A quiet boot has to read as quiet: an empty report is indistinguishable from a
+            // command that did not work.
+            send_to_char("No account errors recorded since boot.\n\r", ch);
+            return;
+        }
+
+        const std::vector<account_errors::Entry> entries = account_errors::recent(rows);
+
+        char header[MAX_INPUT_LENGTH];
+        snprintf(header, sizeof(header), "Account errors since boot: %lu recorded, showing %lu (newest first).\n\r",
+            static_cast<unsigned long>(recorded), static_cast<unsigned long>(entries.size()));
+
+        // Built as a string and paged rather than sent in one go: buf is MAX_STRING_LENGTH and a
+        // full hundred rows is larger than that, and a bulk send past a few hundred lines fails
+        // silently. Each row is bounded so that show_string's 22-line page cannot overflow its own
+        // MAX_STRING_LENGTH buffer either.
+        std::string report = header;
+        for (const account_errors::Entry& entry : entries) {
+            char when[32];
+            struct tm broken_down_time { };
+            if (localtime_r(&entry.when, &broken_down_time) == nullptr
+                || strftime(when, sizeof(when), "%b %d %H:%M", &broken_down_time) == 0) {
+                snprintf(when, sizeof(when), "%s", "?");
+            }
+
+            char row[320];
+            snprintf(row, sizeof(row), "  [%s] %-9s acct=%s char=%s%s%s: %s\n\r", when,
+                account_errors::source_name(entry.source),
+                entry.account.empty() ? "?" : entry.account.c_str(),
+                entry.character.empty() ? "?" : entry.character.c_str(),
+                entry.actor.empty() ? "" : " by=", entry.actor.c_str(),
+                entry.reason.c_str());
+            report += row;
+        }
+
+        page_string(ch->desc, const_cast<char*>(report.c_str()), 1);
         return;
     }
 
@@ -3391,9 +3451,10 @@ ACMD(do_account)
         if (!account::admin_link_and_migrate_character(root_directory, account_data.account_name, value, time(0), &account_data, &migration, &error_message)) {
             // The success below has always been logged; the failure was seen only by whoever ran
             // it. By the time a player asks why their character never appeared, the log is the
-            // only place the attempt could still be recorded.
-            vmudlog(BRF, "%s FAILED to migrate character %s into account %s: %s",
-                GET_NAME(ch), value, account_data.account_name.c_str(), error_message.c_str());
+            // only place the attempt could still be recorded -- and `account errors` is where it
+            // can be asked for once those lines have scrolled away.
+            account_errors::record(account_errors::Source::Migration, account_data.account_name,
+                value, error_message, GET_NAME(ch));
             send_to_char((error_message + "\n\r").c_str(), ch);
             return;
         }

@@ -49,6 +49,10 @@ bool write_account_character_file(const std::string& root_directory, const std::
         // phrase.
         set_error(error_message, "Character file for '" + std::string(stored_character.name)
                 + "' was not written: it cannot be read back (" + readback_error + ").");
+        // The player keeps playing while their progress stops being written, so this one has to be
+        // askable in game rather than only findable in the log.
+        account_errors::record(account_errors::Source::Save, account_name, stored_character.name,
+            readback_error);
         return false;
     }
 

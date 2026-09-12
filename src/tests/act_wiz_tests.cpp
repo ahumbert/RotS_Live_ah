@@ -1,3 +1,4 @@
+#include "../account_errors.h"
 #include "../account_management.h"
 #include "../db.h"
 #include "../exploits_json.h"
@@ -301,18 +302,103 @@ TEST(ActWiz, AccountMigrateCharFailureIsLogged)
     admin.desc = &descriptor;
     admin.player.name = strdup("tester");
 
+    account_errors::clear();
     char migrate_command[] = "migratechar player@example.com nosuchcharacter";
     testing::internal::CaptureStderr();
     do_account(&admin, migrate_command, nullptr, 0, 0);
     const std::string logged = testing::internal::GetCapturedStderr();
 
-    // Asserted together on one line: the loader already writes its own lines to stderr while
-    // failing, so a bare search for the character name passes on output that says nothing about
-    // the migration having been attempted.
-    const std::size_t failure_line = logged.find("FAILED to migrate character nosuchcharacter into account alpha-admin");
-    EXPECT_NE(failure_line, std::string::npos)
-        << "a failed migration must name the character and the account in the log; logged: " << logged;
+    // Asserted as one string: the loader already writes its own lines to stderr while failing, so a
+    // bare search for the character name passes on output that says nothing about the migration
+    // having been attempted. The fixed field order is what makes this a precise query.
+    EXPECT_NE(logged.find("ACCTERR migration acct=alpha-admin char=nosuchcharacter by=tester:"), std::string::npos)
+        << "a failed migration must name the account, the character and who ran it; logged: " << logged;
 
+    // And it must still be answerable when the log line has scrolled away.
+    const std::vector<account_errors::Entry> recorded = account_errors::recent(10);
+    ASSERT_EQ(recorded.size(), 1u);
+    EXPECT_EQ(recorded[0].source, account_errors::Source::Migration);
+    EXPECT_EQ(recorded[0].account, "alpha-admin");
+    EXPECT_EQ(recorded[0].character, "nosuchcharacter");
+
+    account_errors::clear();
+    free(admin.player.name);
+}
+
+TEST(ActWiz, AccountErrorsListsWhatThisBootRecordedNewestFirst)
+{
+    // The retrieval half. Everything here already reached the log when it happened; this is for the
+    // player who reports it hours later, once the lines have scrolled away.
+    account_errors::clear();
+    account_errors::record(account_errors::Source::Migration, "alpha-admin", "aragorn", "description exceeds 511 bytes");
+    account_errors::record(account_errors::Source::Save, "alpha-admin", "legolas", "it cannot be read back");
+
+    descriptor_data descriptor = make_descriptor();
+    char_data admin {};
+    admin.desc = &descriptor;
+    admin.player.name = strdup("tester");
+
+    char errors_command[] = "errors";
+    do_account(&admin, errors_command, nullptr, 0, 0);
+    const std::string output = descriptor.small_outbuf;
+
+    const std::size_t save_row = output.find("legolas");
+    const std::size_t migration_row = output.find("aragorn");
+    ASSERT_NE(save_row, std::string::npos) << output;
+    ASSERT_NE(migration_row, std::string::npos) << output;
+    EXPECT_LT(save_row, migration_row) << "newest first, so the most recent failure is at the top";
+    EXPECT_NE(output.find("migration"), std::string::npos) << output;
+    EXPECT_NE(output.find("save"), std::string::npos) << output;
+    EXPECT_NE(output.find("it cannot be read back"), std::string::npos) << output;
+
+    account_errors::clear();
+    free(admin.player.name);
+}
+
+TEST(ActWiz, AccountErrorsSaysSoWhenThisBootHasRecordedNothing)
+{
+    // A quiet boot must read as quiet. An empty report that says nothing at all is indistinguishable
+    // from a command that did not work.
+    account_errors::clear();
+
+    descriptor_data descriptor = make_descriptor();
+    char_data admin {};
+    admin.desc = &descriptor;
+    admin.player.name = strdup("tester");
+
+    char errors_command[] = "errors";
+    do_account(&admin, errors_command, nullptr, 0, 0);
+
+    EXPECT_NE(std::string(descriptor.small_outbuf).find("No account errors"), std::string::npos)
+        << descriptor.small_outbuf;
+
+    free(admin.player.name);
+}
+
+TEST(ActWiz, AccountErrorsShowsOnlyAsManyRowsAsAsked)
+{
+    account_errors::clear();
+    for (int index = 0; index < 5; ++index) {
+        account_errors::record(account_errors::Source::Boot, "alpha-admin",
+            "char" + std::to_string(index), "unreadable");
+    }
+
+    descriptor_data descriptor = make_descriptor();
+    char_data admin {};
+    admin.desc = &descriptor;
+    admin.player.name = strdup("tester");
+
+    char errors_command[] = "errors 2";
+    do_account(&admin, errors_command, nullptr, 0, 0);
+    const std::string output = descriptor.small_outbuf;
+
+    EXPECT_NE(output.find("char4"), std::string::npos) << output;
+    EXPECT_NE(output.find("char3"), std::string::npos) << output;
+    EXPECT_EQ(output.find("char2"), std::string::npos) << "asked for two rows: " << output;
+    // Saying how many were held is what stops a capped view reading as the whole truth.
+    EXPECT_NE(output.find("5"), std::string::npos) << output;
+
+    account_errors::clear();
     free(admin.player.name);
 }
 
