@@ -282,6 +282,40 @@ std::string make_valid_exploit_bytes()
     return exploit_bytes;
 }
 
+TEST(ActWiz, AccountMigrateCharFailureIsLogged)
+{
+    // A migration that will not complete is a record worth keeping whoever ran it. The immortal sees
+    // the reason on their screen and nobody else does -- and by the time a player reports that their
+    // 1998 character never appeared, the only evidence of the attempt is whatever the log holds.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+    ASSERT_EQ(mkdir("accounts", 0700), 0);
+    ASSERT_EQ(mkdir("accounts/A-E", 0700), 0);
+
+    account::AccountData created_account;
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(".", "alpha-admin", "player@example.com", "ValidPass1", 1700010200, &created_account, &error_message)) << error_message;
+
+    descriptor_data descriptor = make_descriptor();
+    char_data admin {};
+    admin.desc = &descriptor;
+    admin.player.name = strdup("tester");
+
+    char migrate_command[] = "migratechar player@example.com nosuchcharacter";
+    testing::internal::CaptureStderr();
+    do_account(&admin, migrate_command, nullptr, 0, 0);
+    const std::string logged = testing::internal::GetCapturedStderr();
+
+    // Asserted together on one line: the loader already writes its own lines to stderr while
+    // failing, so a bare search for the character name passes on output that says nothing about
+    // the migration having been attempted.
+    const std::size_t failure_line = logged.find("FAILED to migrate character nosuchcharacter into account alpha-admin");
+    EXPECT_NE(failure_line, std::string::npos)
+        << "a failed migration must name the character and the account in the log; logged: " << logged;
+
+    free(admin.player.name);
+}
+
 TEST(ActWiz, AccountCommandAcceptsEmailForShowAndMutatingSubcommands)
 {
     TemporaryDirectory temp_directory;

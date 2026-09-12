@@ -3389,6 +3389,11 @@ ACMD(do_account)
         }
 
         if (!account::admin_link_and_migrate_character(root_directory, account_data.account_name, value, time(0), &account_data, &migration, &error_message)) {
+            // The success below has always been logged; the failure was seen only by whoever ran
+            // it. By the time a player asks why their character never appeared, the log is the
+            // only place the attempt could still be recorded.
+            vmudlog(BRF, "%s FAILED to migrate character %s into account %s: %s",
+                GET_NAME(ch), value, account_data.account_name.c_str(), error_message.c_str());
             send_to_char((error_message + "\n\r").c_str(), ch);
             return;
         }

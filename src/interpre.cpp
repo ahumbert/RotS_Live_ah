@@ -3877,6 +3877,12 @@ void nanny(struct descriptor_data* d, char* arg)
             account::CharacterMigrationData migration;
             std::string error_message;
             if (!account::admin_link_and_migrate_character(kAccountStorageRoot, d->account_name, legacy_name, time(0), &account_data, &migration, &error_message)) {
+                // Same reasoning as the in-game link path above: this is the one-way door onto
+                // account storage, and a character that will not convert is stuck outside it.
+                // Telling only the player made that invisible -- and this is the path a returning
+                // player uses for a character that has been sitting in players/ for decades.
+                vmudlog(BRF, "FAILED to add legacy character %s to account %s: %s",
+                    legacy_name, d->account_name, error_message.c_str());
                 SEND_TO_Q((error_message + "\n\r").c_str(), d);
                 *d->account_character_name = '\0';
                 if (account::read_account_file(kAccountStorageRoot, d->account_name, &account_data, nullptr))

@@ -2753,6 +2753,86 @@ TEST(InterpreAccountMenu, AccountMenuLinkChoiceUsesPlayerFacingSuccessMessage)
     EXPECT_EQ(std::count(reloaded_account.characters.begin(), reloaded_account.characters.end(), "aragorn"), 1);
 }
 
+TEST(InterpreAccountMenu, AccountMenuLinkFailureIsLoggedAndLeavesTheLegacyFilesInPlace)
+{
+    // The one-way door onto the account system. A conversion that cannot complete told the player
+    // and nobody else -- no syslog line, no mudlog -- so a character stuck outside account storage
+    // was invisible unless the player thought to report it. The in-game link path already logs its
+    // failures; this is the path a returning player uses to add a character from 1998.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+    ScopedPlayerTableReset player_table_reset;
+    ASSERT_EQ(mkdir("accounts", 0700), 0);
+    ASSERT_EQ(mkdir("accounts/A-E", 0700), 0);
+    ASSERT_EQ(mkdir("players", 0700), 0);
+    ASSERT_EQ(mkdir("players/A-E", 0700), 0);
+    ASSERT_EQ(mkdir("players/F-J", 0700), 0);
+    ASSERT_EQ(mkdir("players/K-O", 0700), 0);
+    ASSERT_EQ(mkdir("players/P-T", 0700), 0);
+    ASSERT_EQ(mkdir("players/U-Z", 0700), 0);
+    ASSERT_EQ(mkdir("players/ZZZ", 0700), 0);
+    ASSERT_EQ(mkdir("plrobjs", 0700), 0);
+    ASSERT_EQ(mkdir("plrobjs/A-E", 0700), 0);
+    ASSERT_EQ(mkdir("exploits", 0700), 0);
+    ASSERT_EQ(mkdir("exploits/A-E", 0700), 0);
+
+    account::AccountData stored_account;
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(".", "acct", "player@example.com", "ValidPass1", 1700010200, &stored_account, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_verify_email(".", "acct", "test", 1700010201, &stored_account, &error_message)) << error_message;
+
+    char_file_u legacy_character = make_stored_character("aragorn", 50, RACE_WOOD);
+    legacy_character.specials2.idnum = 4242;
+    legacy_character.last_logon = 1700010202;
+    const std::string legacy_player_path = write_valid_legacy_player_file(temp_directory.path(), legacy_character);
+    const int legacy_player_index = create_entry(const_cast<char*>("aragorn"));
+    ASSERT_GE(legacy_player_index, 0);
+    std::snprintf(player_table[legacy_player_index].ch_file, sizeof(player_table[legacy_player_index].ch_file), "%s", legacy_player_path.c_str());
+    player_table[legacy_player_index].level = legacy_character.level;
+    player_table[legacy_player_index].race = legacy_character.race;
+    player_table[legacy_player_index].idnum = legacy_character.specials2.idnum;
+    player_table[legacy_player_index].log_time = legacy_character.last_logon;
+    player_table[legacy_player_index].flags = legacy_character.specials2.act;
+
+    descriptor_data descriptor = make_descriptor();
+
+    char menu_choice[] = "3";
+    nanny(&descriptor, menu_choice);
+    ASSERT_EQ(descriptor.connected, CON_ACCTLINKNAME);
+
+    char name_choice[] = "aragorn";
+    nanny(&descriptor, name_choice);
+    ASSERT_EQ(descriptor.connected, CON_ACCTLEGPWD);
+
+    descriptor.output[0] = '\0';
+    descriptor.bufptr = 0;
+    descriptor.bufspace = SMALL_BUFSIZE - 1;
+
+    // The account's own directory loses its write bit, so the conversion cannot put anything there.
+    const std::string account_directory = "accounts/P-T/player@example.com";
+    ASSERT_EQ(chmod(account_directory.c_str(), 0500), 0);
+
+    testing::internal::CaptureStderr();
+    char password_choice[] = "LegacyPw1";
+    nanny(&descriptor, password_choice);
+    const std::string logged = testing::internal::GetCapturedStderr();
+    ASSERT_EQ(chmod(account_directory.c_str(), 0700), 0);
+
+    EXPECT_EQ(descriptor.connected, CON_ACCTMENU);
+    EXPECT_NE(logged.find("aragorn"), std::string::npos)
+        << "a failed conversion must name the character in the log; logged: " << logged;
+    EXPECT_NE(logged.find("acct"), std::string::npos)
+        << "and the account it was being added to; logged: " << logged;
+
+    struct stat legacy_info { };
+    EXPECT_EQ(stat(legacy_player_path.c_str(), &legacy_info), 0)
+        << "the legacy player file must survive a failed conversion";
+
+    account::AccountData reloaded_account;
+    ASSERT_TRUE(account::read_account_file(".", "acct", &reloaded_account, &error_message)) << error_message;
+    EXPECT_FALSE(account::account_has_character(reloaded_account, "aragorn"));
+}
+
 TEST(InterpreAccountMenu, InGameLinkChoiceUsesPlayerFacingSuccessMessage)
 {
     TemporaryDirectory temp_directory;
