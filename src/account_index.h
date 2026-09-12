@@ -164,6 +164,14 @@ bool is_character_ambiguous(const std::string& character_name);
 // thing is the address and the records disputing it are distinguished by where they live. Contested
 // means the claims disagree about the account name -- the scan's own duplicate test -- so an address
 // heals as soon as a rewrite makes the names agree, or when the surviving record is quarantined.
+//
+// It does NOT heal on the other repair. Claims are added and restated, never withdrawn per claimant,
+// and nothing in the process observes an operator deleting one of the two files -- so that address
+// keeps refusing until the next boot rebuilds the index. Left alone deliberately: reaching this
+// state at all takes a hand-written or restored legacy flat record declaring a live player's address
+// under a different account name (two directory records cannot do it -- their path IS their email),
+// production has no flat records left, and the cost is one address refusing, listed by `account
+// index` with both claimant paths named.
 bool is_email_ambiguous(const std::string& email);
 
 // One contested key, for display. `kind` is "character", "account name" or "email"; `claimants` are
