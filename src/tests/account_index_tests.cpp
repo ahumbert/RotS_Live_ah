@@ -262,9 +262,12 @@ TEST_F(AccountIndexTest, QuarantinedCountTracksOnlyBadRecords)
     EXPECT_EQ(account_index::size(), 3u);
 }
 
-TEST_F(AccountIndexTest, QuarantineThresholdIsFive)
+TEST_F(AccountIndexTest, QuarantineThresholdIsTen)
 {
-    EXPECT_EQ(account_index::MAX_QUARANTINED_RECORDS_AT_BOOT, 5u);
+    // Ten of the roughly fifty accounts on live. Five was two orders of magnitude below the
+    // record count it is meant to detect a format break in -- such a break takes out every
+    // record at once -- while sitting right on top of the one-off it must never fire on.
+    EXPECT_EQ(account_index::MAX_QUARANTINED_RECORDS_AT_BOOT, 10u);
 }
 
 TEST_F(AccountIndexTest, QuarantinedEntriesReportPathAndReason)

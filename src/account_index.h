@@ -23,7 +23,10 @@ namespace account_index {
 // the other things quarantine files -- a record filed where its own email does not resolve, a legacy
 // flat record with no usable address, a bucket that would not open -- are an operator's doing, and a
 // system administrator who copied an account directory in place did not intend to stop the server.
-static constexpr std::size_t MAX_QUARANTINED_RECORDS_AT_BOOT = 5;
+// Ten, against the roughly fifty accounts on live. A format break takes out every record at once,
+// so any value in this range detects it identically; what lives in the low single digits is the
+// genuine one-off -- a partial restore, a hand-edited file -- which must never take the game down.
+static constexpr std::size_t MAX_QUARANTINED_RECORDS_AT_BOOT = 10;
 
 // One indexed record. A quarantined entry still occupies its email so that a record we could not
 // parse cannot be silently overwritten by a fresh account created at the same address.

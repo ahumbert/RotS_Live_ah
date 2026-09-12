@@ -2115,16 +2115,19 @@ TEST(DbLoader, BootsPastMoreMisfiledRecordsThanTheQuarantineLimit)
     // something" -- not a corruption tolerance. A record filed where its own email does not resolve
     // is nobody's bug but the operator's: backing up an account directory in place makes one, and
     // each one files TWO quarantine entries (the name it sits under, and the address it declares).
-    // Three such copies used to exceed the limit and stop the server, locking out every player over
-    // files a system administrator put there with no intention of preventing a boot.
+    // A handful of such copies used to exceed the limit and stop the server, locking out every
+    // player over files a system administrator put there with no intention of preventing a boot.
     TemporaryDirectory temp_directory;
     ScopedWorkingDirectory working_directory(temp_directory.path());
 
     ASSERT_EQ(mkdir("accounts", 0700), 0);
     ASSERT_EQ(mkdir("accounts/A-E", 0700), 0);
 
+    // Derived from the limit, not a fixed six: a raised limit must not quietly turn this into a
+    // test of a tree that never reached it.
+    const std::size_t misfiled_records = account_index::MAX_QUARANTINED_RECORDS_AT_BOOT + 1;
     std::string error_message;
-    for (int index = 0; index < 6; ++index) {
+    for (std::size_t index = 0; index < misfiled_records; ++index) {
         const std::string email = "a" + std::to_string(index) + "@example.com";
         const std::string account_name = "alpha-admin" + std::to_string(index);
         ASSERT_TRUE(account::create_account(".", account_name, email, "ValidPass1", 1700010101, nullptr, &error_message))
@@ -2157,7 +2160,7 @@ TEST(DbLoader, StillRefusesToBootPastMoreUnreadableRecordsThanTheQuarantineLimit
     ASSERT_EQ(mkdir("accounts", 0700), 0);
     ASSERT_EQ(mkdir("accounts/A-E", 0700), 0);
 
-    for (int index = 0; index < 6; ++index)
+    for (std::size_t index = 0; index <= account_index::MAX_QUARANTINED_RECORDS_AT_BOOT; ++index)
         write_file("accounts/A-E/broken" + std::to_string(index) + ".json", "this is not an account record");
 
     account_index::clear();
