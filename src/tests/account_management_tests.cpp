@@ -2770,6 +2770,141 @@ TEST(AccountManagement, MigrationRejectsPartialFollowerSectionAndCleansUpAccount
     EXPECT_FALSE(account::account_exploit_file_exists(temp_directory.path(), "alpha-admin", "aragorn", nullptr));
 }
 
+namespace {
+
+// Sets up a legacy character with all three files and returns their paths, so a test can prove the
+// rule that matters: whatever goes wrong, the sources are exactly as they were.
+struct LegacySourceFiles {
+    std::string player_path;
+    std::string object_path;
+    std::string exploit_path;
+    std::string player_text;
+    std::string object_bytes;
+    std::string exploit_bytes;
+};
+
+LegacySourceFiles write_complete_legacy_character(const std::string& root, const std::string& character_name)
+{
+    LegacySourceFiles sources;
+    sources.player_path = account::legacy_player_file_path(root, character_name);
+    sources.object_path = account::legacy_object_file_path(root, character_name);
+    sources.exploit_path = account::legacy_exploits_file_path(root, character_name);
+    sources.player_text = write_valid_legacy_player_file(root, make_stored_character(character_name.c_str()));
+
+    objects_json::ObjectSaveData object_data;
+    object_data.rent.rentcode = RENT_CRASH;
+    object_data.rent.gold = 4200;
+    object_data.aliases.push_back({ "assist", "kill orc" });
+    std::string error_message;
+    EXPECT_TRUE(objects_json::object_save_data_to_binary(object_data, &sources.object_bytes, &error_message)) << error_message;
+    write_text_file(sources.object_path, sources.object_bytes);
+
+    sources.exploit_bytes = make_valid_exploit_bytes();
+    write_text_file(sources.exploit_path, sources.exploit_bytes);
+    return sources;
+}
+
+// A path the atomic write cannot rename onto. Non-empty on purpose: cleanup std::remove()s the
+// output paths, and remove() rmdir's an EMPTY directory, which would take the obstruction away and
+// make the test pass for the wrong reason.
+void obstruct_path_with_directory(const std::string& path)
+{
+    ASSERT_EQ(mkdir(path.c_str(), 0700), 0);
+    write_text_file(path + "/occupied", "occupied");
+}
+
+void expect_legacy_sources_untouched(const LegacySourceFiles& sources)
+{
+    EXPECT_EQ(read_file_contents(sources.player_path), sources.player_text);
+    EXPECT_EQ(read_file_contents(sources.object_path), sources.object_bytes);
+    EXPECT_EQ(read_file_contents(sources.exploit_path), sources.exploit_bytes);
+}
+
+} // namespace
+
+TEST(AccountManagement, MigrationLeavesTheLegacySourcesIntactWhenTheObjectFileCannotBeWritten)
+{
+    // The rule, at the failure point nothing covered: not a malformed source this time but a write
+    // that will not land. By then the character file has already been written, so "stop and leave
+    // the sources alone" also means taking that back.
+    TemporaryDirectory temp_directory;
+    ASSERT_EQ(mkdir((temp_directory.path() + "/players").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/players/A-E").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/plrobjs").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/plrobjs/A-E").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/exploits").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/exploits/A-E").c_str(), 0700), 0);
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(temp_directory.path(), "alpha-admin", "player@example.com", "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
+
+    const LegacySourceFiles sources = write_complete_legacy_character(temp_directory.path(), "aragorn");
+    obstruct_path_with_directory(account::account_character_object_path(temp_directory.path(), "alpha-admin", "aragorn"));
+
+    account::CharacterMigrationData migration;
+    EXPECT_FALSE(account::migrate_legacy_character_by_name(temp_directory.path(), "alpha-admin", "aragorn", 1700010102, &migration, &error_message));
+
+    expect_legacy_sources_untouched(sources);
+    EXPECT_FALSE(account::account_character_file_exists(temp_directory.path(), "alpha-admin", "aragorn", nullptr))
+        << "the character file written before the failure must not be left behind";
+    EXPECT_FALSE(account::account_exploit_file_exists(temp_directory.path(), "alpha-admin", "aragorn", nullptr));
+}
+
+TEST(AccountManagement, MigrationLeavesTheLegacySourcesIntactWhenTheCharacterFileCannotBeWritten)
+{
+    // The first output written, and the one whose failure path deliberately does no cleanup --
+    // safe only while its write is the last thing that step does. Pinned here so a later edit that
+    // adds work after that write has to answer for it.
+    TemporaryDirectory temp_directory;
+    ASSERT_EQ(mkdir((temp_directory.path() + "/players").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/players/A-E").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/plrobjs").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/plrobjs/A-E").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/exploits").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/exploits/A-E").c_str(), 0700), 0);
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(temp_directory.path(), "alpha-admin", "player@example.com", "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
+
+    const LegacySourceFiles sources = write_complete_legacy_character(temp_directory.path(), "aragorn");
+    obstruct_path_with_directory(account::account_character_player_path(temp_directory.path(), "alpha-admin", "aragorn"));
+
+    account::CharacterMigrationData migration;
+    EXPECT_FALSE(account::migrate_legacy_character_by_name(temp_directory.path(), "alpha-admin", "aragorn", 1700010102, &migration, &error_message));
+
+    expect_legacy_sources_untouched(sources);
+    EXPECT_FALSE(account::account_object_file_exists(temp_directory.path(), "alpha-admin", "aragorn", nullptr));
+    EXPECT_FALSE(account::account_exploit_file_exists(temp_directory.path(), "alpha-admin", "aragorn", nullptr));
+}
+
+TEST(AccountManagement, MigrationLeavesTheLegacySourcesIntactWhenTheExploitFileCannotBeWritten)
+{
+    // The last output written, so by this point both of the others are on disk and both have to go
+    // back. Same rule, one step later.
+    TemporaryDirectory temp_directory;
+    ASSERT_EQ(mkdir((temp_directory.path() + "/players").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/players/A-E").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/plrobjs").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/plrobjs/A-E").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/exploits").c_str(), 0700), 0);
+    ASSERT_EQ(mkdir((temp_directory.path() + "/exploits/A-E").c_str(), 0700), 0);
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(temp_directory.path(), "alpha-admin", "player@example.com", "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
+
+    const LegacySourceFiles sources = write_complete_legacy_character(temp_directory.path(), "aragorn");
+    obstruct_path_with_directory(account::account_character_exploits_path(temp_directory.path(), "alpha-admin", "aragorn"));
+
+    account::CharacterMigrationData migration;
+    EXPECT_FALSE(account::migrate_legacy_character_by_name(temp_directory.path(), "alpha-admin", "aragorn", 1700010102, &migration, &error_message));
+
+    expect_legacy_sources_untouched(sources);
+    EXPECT_FALSE(account::account_character_file_exists(temp_directory.path(), "alpha-admin", "aragorn", nullptr))
+        << "the character file written before the failure must not be left behind";
+    EXPECT_FALSE(account::account_object_file_exists(temp_directory.path(), "alpha-admin", "aragorn", nullptr))
+        << "nor the object file";
+}
+
 TEST(AccountManagement, MigrationWritesDefaultAccountNativeObjectFileWhenLegacyObjectDataIsMissing)
 {
     TemporaryDirectory temp_directory;
