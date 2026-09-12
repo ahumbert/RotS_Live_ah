@@ -2651,7 +2651,10 @@ int load_player_from_text(char* name, const char* player_text, struct char_file_
 int load_player(char* name, struct char_file_u* char_element)
 {
     int tmp;
-    char playerfname[100];
+    // Sized off the field it copies, not a round number. It was 100 while ch_file was 80, which
+    // made it safe by accident; widening ch_file to 160 for account-native paths took that away and
+    // an ordinary long email address was enough to run off the end of this buffer on every login.
+    char playerfname[sizeof(player_table->ch_file)];
     char* pf = 0;
 
     for (tmp = 0; name[tmp]; ++tmp)
@@ -2667,7 +2670,7 @@ int load_player(char* name, struct char_file_u* char_element)
         return -1;
     }
 
-    sprintf(playerfname, "%s", (player_table + tmp)->ch_file);
+    snprintf(playerfname, sizeof(playerfname), "%s", (player_table + tmp)->ch_file);
     if (has_suffix(playerfname, ".character.json"))
         return load_player_from_account_json_path(name, playerfname, char_element);
 

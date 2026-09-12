@@ -882,6 +882,60 @@ TEST(DbLoader, BuildPlayerIndexIncludesLegacyAndAccountNativeCharacters)
     EXPECT_EQ(loaded_character.player_index, 1);
 }
 
+TEST(DbLoader, LoadsAnAccountNativeCharacterIndexedUnderALongEmailAddress)
+{
+    // Nothing caps the length of an email address -- is_valid_email checks shape, not size -- and an
+    // account-native path is "./accounts/<bucket>/<email>/<name>.character.json": 31 fixed bytes
+    // plus the address plus the character name. player_index_element::ch_file holds 160 of those and
+    // update_player_index_entry_from_store accepts anything that fits, so an ordinary long corporate
+    // address indexes without complaint. load_player then has to carry that path, and it runs on
+    // every login for that character.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+    ScopedPlayerTableReset player_table_reset;
+
+    ASSERT_EQ(mkdir("players", 0700), 0);
+    ASSERT_EQ(mkdir("players/A-E", 0700), 0);
+    ASSERT_EQ(mkdir("players/F-J", 0700), 0);
+    ASSERT_EQ(mkdir("players/K-O", 0700), 0);
+    ASSERT_EQ(mkdir("players/P-T", 0700), 0);
+    ASSERT_EQ(mkdir("players/U-Z", 0700), 0);
+    ASSERT_EQ(mkdir("accounts", 0700), 0);
+
+    const std::string long_email = "a-very-long-but-entirely-ordinary-address@long-subdomain.example.com";
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(".", "alpha-admin", long_email, "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_link_character(".", "alpha-admin", "legolas", 1700010102, nullptr, &error_message)) << error_message;
+
+    char_file_u stored_character {};
+    std::snprintf(stored_character.name, sizeof(stored_character.name), "%s", "legolas");
+    stored_character.level = 25;
+    stored_character.race = 3;
+    stored_character.last_logon = 1700010200;
+    stored_character.specials2.idnum = 222;
+    stored_character.specials2.act = 0;
+    ASSERT_TRUE(account::write_account_character_file(".", "alpha-admin", stored_character, &error_message)) << error_message;
+
+    build_player_index();
+
+    ASSERT_EQ(top_of_p_table, 0);
+    // The premise of the test: a path the player index holds happily but that does not fit in a
+    // 100-byte buffer. If this ever stops being true the test below proves nothing.
+    ASSERT_GT(std::strlen(player_table[0].ch_file), static_cast<std::size_t>(100));
+
+    // Forked, because the regression this guards against is a stack-buffer overflow: in-process it
+    // aborts the whole binary and every later suite goes unreported with it.
+    EXPECT_EXIT(
+        {
+            char lookup_name[] = "legolas";
+            char_file_u loaded_character {};
+            const int result = load_player(lookup_name, &loaded_character);
+            std::exit((result == 1 && std::strcmp(loaded_character.name, "legolas") == 0) ? 0 : 1);
+        },
+        ::testing::ExitedWithCode(0), "");
+}
+
 TEST(DbLoader, BuildPlayerIndexKeepsTheAccountUsableWhenOneCharacterFileIsUnreadable)
 {
     // One unreadable <name>.character.json must not lock its owner out of the whole account. The
