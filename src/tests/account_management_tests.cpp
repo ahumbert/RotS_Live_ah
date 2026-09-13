@@ -1571,6 +1571,27 @@ TEST(AccountManagement, RefusesToWriteACharacterFileItCannotReadBack)
         << "and it must still be the character that was written, not the one that was refused";
 }
 
+TEST(AccountManagement, StillSavesACharacterHoldingOnlyOneHalfOfACollidingPair)
+{
+    // The guard must refuse the character that would produce a duplicate key and nobody else. One
+    // side of the pair writes the key once, which reads back fine -- refusing it would stop a real
+    // player's saves over nothing.
+    TemporaryDirectory temp_directory;
+    std::string error_message;
+
+    ASSERT_TRUE(account::create_account(temp_directory.path(), "alpha-admin", "player@example.com", "ValidPass1", 1700007776, nullptr, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_link_character(temp_directory.path(), "alpha-admin", "aragorn", 1700007777, nullptr, &error_message)) << error_message;
+
+    char_file_u one_side = make_stored_character("aragorn");
+    one_side.skills[125] = 40;
+    ASSERT_TRUE(account::write_account_character_file(temp_directory.path(), "alpha-admin", one_side, &error_message))
+        << error_message;
+
+    char_file_u loaded {};
+    ASSERT_TRUE(account::read_account_character_file(temp_directory.path(), "alpha-admin", "aragorn", &loaded, &error_message)) << error_message;
+    EXPECT_EQ(loaded.skills[125], 40) << "and the value survives the round trip";
+}
+
 TEST(AccountManagement, WritesAndReadsAccountNativeCharacterFile)
 {
     TemporaryDirectory temp_directory;

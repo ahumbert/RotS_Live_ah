@@ -8,7 +8,9 @@
 #include <cctype>
 #include <charconv>
 #include <cstddef>
+#include <functional>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <unordered_map>
 
@@ -2791,9 +2793,9 @@ bool deserialize_character_from_json(const std::string& json, CharacterData* cha
             if (key == "state")
                 return saw_state = true, parse_state_object(nested_reader, &parsed_character, nested_error_message);
             if (key == "talks")
-                return saw_talks = true, parse_named_integer_object(nested_reader, &parsed_character.talks, MAX_TOUNGE, "talk", talk_index_for_key, nested_error_message);
+                return saw_talks = true, parse_named_integer_object(nested_reader, &parsed_character.talks, MAX_TOUNGE, "talk", talk_index_for_key_memoized, nested_error_message);
             if (key == "skills")
-                return saw_skills = true, parse_named_integer_object(nested_reader, &parsed_character.skills, MAX_SKILLS, "skill", skill_index_for_key, nested_error_message);
+                return saw_skills = true, parse_named_integer_object(nested_reader, &parsed_character.skills, MAX_SKILLS, "skill", skill_index_for_key_memoized, nested_error_message);
             if (key == "affects")
                 return saw_affects = true, parse_affects_array(nested_reader, &parsed_character.affects, nested_error_message);
             return nested_reader->skip_value(nested_error_message);
@@ -2980,6 +2982,70 @@ bool deserialize_character_from_json_v2a(const std::string& json, CharacterData*
 bool deserialize_character_from_json_v2b(const std::string& json, CharacterData* character, std::string* error_message)
 {
     return deserialize_character_v2_dispatch<json_utils::JsonReaderV2>(json, character, error_message);
+}
+
+namespace {
+
+    // Walks one name-keyed table and reports every key more than one slot produces. Built once per
+    // process: the tables are static data, so the answer cannot change while the game runs.
+    void collect_collisions_for_table(const char* table_name, int slot_count,
+        const std::function<std::string(int)>& key_for_index, std::vector<NamedKeyCollision>* out)
+    {
+        std::map<std::string, std::vector<int>> slots_by_key;
+        for (int index = 0; index < slot_count; ++index)
+            slots_by_key[key_for_index(index)].push_back(index);
+
+        for (const auto& entry : slots_by_key) {
+            if (entry.second.size() < 2)
+                continue;
+            NamedKeyCollision collision;
+            collision.table = table_name;
+            collision.key = entry.first;
+            collision.indices = entry.second;
+            out->push_back(collision);
+        }
+    }
+
+} // namespace
+
+const std::vector<NamedKeyCollision>& named_key_collisions()
+{
+    static const std::vector<NamedKeyCollision> collisions = [] {
+        std::vector<NamedKeyCollision> found;
+        collect_collisions_for_table("skill", MAX_SKILLS, skill_key_for_index, &found);
+        collect_collisions_for_table("talk", MAX_TOUNGE, talk_key_for_index, &found);
+        return found;
+    }();
+    return collisions;
+}
+
+std::string first_unwritable_named_value(const CharacterData& character)
+{
+    // Cheap by construction: one pass over the collisions the tables actually have (one, today),
+    // counting how many of each group's slots this character holds a value in. Two is what emits the
+    // key twice.
+    for (const NamedKeyCollision& collision : named_key_collisions()) {
+        const std::vector<int>& values = (collision.table == "skill") ? character.skills : character.talks;
+
+        int slots_with_a_value = 0;
+        for (int index : collision.indices) {
+            if (index >= 0 && index < static_cast<int>(values.size()) && values[index] != 0)
+                ++slots_with_a_value;
+        }
+
+        if (slots_with_a_value > 1) {
+            std::string slots;
+            for (int index : collision.indices) {
+                if (!slots.empty())
+                    slots += ", ";
+                slots += std::to_string(index);
+            }
+            return "two or more " + collision.table + " slots share the key '" + collision.key
+                + "' (" + slots + ") and this character holds a value in more than one of them";
+        }
+    }
+
+    return std::string();
 }
 
 std::vector<std::string> encode_player_flags(long flags)

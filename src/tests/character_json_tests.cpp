@@ -1,6 +1,7 @@
 #include "../character_json.h"
 #include "../utils.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -241,6 +242,61 @@ std::string remove_json_field(std::string json, const std::string& key)
 std::string specialization_fragment(int specialization)
 {
     return "\"specialization\": " + std::to_string(specialization);
+}
+
+TEST(CharacterJson, FindsTheSkillTableEntriesThatShareAJsonKey)
+{
+    // consts.cpp carries two skills both named "trash" (125 and 126). Names are what the character
+    // file keys skills by, so those two produce one key -- and a character with values in both
+    // serializes to a duplicate key that the reader refuses for the whole file. Boot reports this;
+    // the save path uses it to refuse the one character that would trip it.
+    const std::vector<character_json::NamedKeyCollision>& collisions = character_json::named_key_collisions();
+
+    const auto trash = std::find_if(collisions.begin(), collisions.end(),
+        [](const character_json::NamedKeyCollision& collision) {
+            return collision.table == "skill" && collision.key == "trash";
+        });
+    ASSERT_NE(trash, collisions.end()) << "the known duplicate skill name must be reported";
+    ASSERT_EQ(trash->indices.size(), 2u);
+    EXPECT_EQ(trash->indices[0], 125);
+    EXPECT_EQ(trash->indices[1], 126);
+}
+
+TEST(CharacterJson, RefusesACharacterHoldingValuesInBothHalvesOfACollidingPair)
+{
+    character_json::CharacterData character;
+    character.skills.assign(MAX_SKILLS, 0);
+    character.talks.assign(MAX_TOUNGE, 0);
+
+    EXPECT_TRUE(character_json::first_unwritable_named_value(character).empty())
+        << "a character with no skills at all is writable";
+
+    character.skills[125] = 40;
+    EXPECT_TRUE(character_json::first_unwritable_named_value(character).empty())
+        << "one side of the pair is fine -- the key is written once";
+
+    character.skills[126] = 60;
+    const std::string clash = character_json::first_unwritable_named_value(character);
+    EXPECT_FALSE(clash.empty()) << "values in both halves produce a duplicate key";
+    EXPECT_NE(clash.find("trash"), std::string::npos) << clash;
+}
+
+TEST(CharacterJson, ResolvesASharedSkillKeyToTheLowestSlotItNames)
+{
+    // The parser's key lookup was a linear first-match scan and is now a memoized map; both must
+    // resolve a shared key to the LOWEST slot, or a character's value silently moves slots on load.
+    character_json::CharacterData character = character_json::character_data_from_store(make_stored_character());
+    character.skills.assign(MAX_SKILLS, 0);
+    character.skills[125] = 7;
+
+    const std::string json = character_json::serialize_character_to_json(character);
+    ASSERT_NE(json.find("\"trash\""), std::string::npos) << "fixture must actually emit the shared key";
+
+    character_json::CharacterData parsed;
+    std::string error_message;
+    ASSERT_TRUE(character_json::deserialize_character_from_json(json, &parsed, &error_message)) << error_message;
+    EXPECT_EQ(parsed.skills[125], 7);
+    EXPECT_EQ(parsed.skills[126], 0) << "the value must not land in the higher slot";
 }
 
 TEST(CharacterJson, EncodesFlagBitvectorsAsReadableNames)

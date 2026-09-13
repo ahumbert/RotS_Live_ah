@@ -36,23 +36,28 @@ bool write_account_character_file(const std::string& root_directory, const std::
     const std::string json = character_json::serialize_character_to_json(character_data);
 
     // The struct round trip above proves the DATA survives; it says nothing about the TEXT, and the
-    // two can disagree. Skills are keyed by name and the skill table carries two entries under the
-    // same name, so a character with values in both emits that key twice and the reader refuses the
-    // whole file. Nothing below can put the previous file back: the write replaces the character's
-    // only copy, and the next login is told the character does not exist. Migration verifies its
-    // conversions for exactly this reason; the save path did not.
-    character_json::CharacterData readback;
-    std::string readback_error;
-    if (!character_json::deserialize_character_from_json(json, &readback, &readback_error)) {
+    // two can disagree in exactly one way: skills and talks are keyed by NAME, and a table carrying
+    // the same name twice (skills 125 and 126 are both "trash") makes a character holding values in
+    // both emit that key twice -- which the reader refuses, for the whole file. Nothing below can
+    // put the previous file back: the write replaces the character's only copy, and the next login
+    // is told the character does not exist.
+    //
+    // Checked directly against the table's own collisions rather than by re-parsing what we just
+    // wrote. Re-parsing cost ~334us on every save of a median character and grew with skill count;
+    // this is one comparison per collision the tables actually have (one, today) and is exact for
+    // the same mechanism. named_key_collisions() is reported at boot, so a table that grows a new
+    // duplicate is visible rather than merely refused later.
+    const std::string unwritable = character_json::first_unwritable_named_value(character_data);
+    if (!unwritable.empty()) {
         // Worded to match the migration guard's refusal (account_management_internal.cpp): the two
         // catch the same thing at different moments, and the conversion path's own test pins this
         // phrase.
         set_error(error_message, "Character file for '" + std::string(stored_character.name)
-                + "' was not written: it cannot be read back (" + readback_error + ").");
+                + "' was not written: it cannot be read back (" + unwritable + ").");
         // The player keeps playing while their progress stops being written, so this one has to be
         // askable in game rather than only findable in the log.
         account_errors::record(account_errors::Source::Save, account_name, stored_character.name,
-            readback_error);
+            unwritable);
         return false;
     }
 

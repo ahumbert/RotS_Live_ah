@@ -320,6 +320,24 @@ void boot_db(void)
     account_index::set_enabled(true);
     log("Account-resolution cache: enabled.");
 
+    // A name-keyed table with the same name twice cannot write a character that holds values in
+    // both slots -- the file would carry a duplicate key and no reader would take it back. That is a
+    // static defect in the tables, so it is reported once here rather than rediscovered by every
+    // save. Not fatal: it only bites the characters holding both, and save_char refuses exactly
+    // those with a reason.
+    for (const character_json::NamedKeyCollision& collision : character_json::named_key_collisions()) {
+        std::string slots;
+        for (int index : collision.indices) {
+            if (!slots.empty())
+                slots += ", ";
+            slots += std::to_string(index);
+        }
+        sprintf(buf, "Table check: %s slots %s all produce the key '%s'. A character with values in more than one of them cannot be saved.",
+            collision.table.c_str(), slots.c_str(), collision.key.c_str());
+        log(buf);
+        mudlog(buf, BRF, LEVEL_IMMORT, TRUE);
+    }
+
     log("Resetting the game time:");
     reset_time();
     log("Allocating the primary memory.");

@@ -160,6 +160,25 @@ std::string serialize_character_to_json_v2b(const CharacterData& character);
 bool deserialize_character_from_json_v2a(const std::string& json, CharacterData* character, std::string* error_message = nullptr);
 bool deserialize_character_from_json_v2b(const std::string& json, CharacterData* character, std::string* error_message = nullptr);
 
+// Two or more entries in a name-keyed table that produce the SAME JSON key. The character file
+// writes skills and talks as objects keyed by name, so a table carrying a duplicate name (today
+// skills 125 and 126, both "trash") makes a character holding values in both serialize to a
+// duplicate key -- which the reader refuses, for the whole file. That is the one way this writer can
+// produce something its own reader will not take back, so it is checked directly rather than by
+// re-parsing every save.
+struct NamedKeyCollision {
+    std::string table; // "skill" or "talk"
+    std::string key; // the JSON key the entries share
+    std::vector<int> indices; // the slots sharing it, ascending
+};
+
+// Computed once from the static tables. Empty on a healthy build; boot reports whatever is here.
+const std::vector<NamedKeyCollision>& named_key_collisions();
+
+// Empty when this character can be written and read back. Otherwise a sentence naming the clash,
+// for the refusal message.
+std::string first_unwritable_named_value(const CharacterData& character);
+
 std::vector<std::string> encode_player_flags(long flags);
 std::vector<std::string> encode_preference_flags(long flags);
 std::vector<std::string> encode_affected_flags(long flags);
