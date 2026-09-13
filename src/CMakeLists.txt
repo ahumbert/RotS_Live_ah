@@ -38,6 +38,7 @@ set(ROTS_SERVER_SOURCES
     act_wiz.cpp
     account_management.cpp
     account_cache.cpp
+    account_ppc.cpp
     account_index.cpp
     account_errors.cpp
     roster_cache.cpp
@@ -114,6 +115,7 @@ set(ROTS_TEST_SOURCES
     tests/account_index_tests.cpp
     tests/account_errors_tests.cpp
     tests/roster_cache_tests.cpp
+    tests/account_ppc_tests.cpp
     tests/account_management_assets_header_compile.cpp
     tests/account_management_identity_header_compile.cpp
     tests/account_management_migration_header_compile.cpp
@@ -135,6 +137,7 @@ set(ROTS_TEST_SOURCES
     tests/mage_tests.cpp
     tests/ObjFlagDataBuilder.cpp
     tests/json_utils_tests.cpp
+    tests/limits_tests.cpp
     tests/json_perf_tests.cpp
     tests/objects_json_tests.cpp
     tests/player_finalize_tests.cpp
