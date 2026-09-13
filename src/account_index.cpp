@@ -313,8 +313,19 @@ void quarantine(const std::string& normalized_email, const std::string& record_p
     // quarantined under its own key, where the operator report still shows it.
     const auto incumbent = g_entries.find(normalized_email);
     if (incumbent != g_entries.end() && !incumbent->second.quarantined
-        && incumbent->second.record_path != record_path)
+        && incumbent->second.record_path != record_path) {
+        // Not simply dropped. A record filed in the wrong BUCKET under the right directory name is
+        // keyed by the same address as the healthy one, so returning here would leave it unindexed,
+        // uncounted and absent from `account index` -- one boot log line the only trace of a file
+        // the game cannot reach. File it under its own path instead, which is where the other
+        // path-shaped quarantines live.
+        //
+        // Recurses exactly once: the path key can only hold a quarantined entry (nothing indexes a
+        // readable record under a path), so the guard above cannot fire on the second call.
+        if (record_path != normalized_email && !record_path.empty())
+            quarantine(record_path, record_path, reason);
         return;
+    }
 
     // Withdraws the record's account-name and character claims as well as dropping its keys, so
     // setting a duplicate record aside is itself a repair: the surviving claimant of a key the two

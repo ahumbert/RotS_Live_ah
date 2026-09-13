@@ -202,10 +202,13 @@ namespace {
             return false;
         }
 
-        if (parsed_alias.keyword.size() >= 20) {
-            set_error(error_message, "Alias keyword must fit within 19 characters.");
-            return false;
-        }
+        // Clamped, not refused, and symmetric with the binary reader. A file written before that
+        // clamp existed can carry a 20-character keyword -- the JSON writer never length-checked --
+        // and migration deleted the legacy .obj behind it. Refusing here would cost that character
+        // its rent, gold, inventory and worn equipment permanently over one character of an alias
+        // name. Nothing downstream can hold more than 19 anyway (alias_list::keyword).
+        if (parsed_alias.keyword.size() > MAX_ALIAS_KEYWORD_LENGTH)
+            parsed_alias.keyword.resize(MAX_ALIAS_KEYWORD_LENGTH);
 
         *alias = std::move(parsed_alias);
         set_error(error_message, "");

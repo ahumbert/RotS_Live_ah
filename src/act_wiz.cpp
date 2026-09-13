@@ -3232,8 +3232,16 @@ ACMD(do_account)
                 snprintf(when, sizeof(when), "%s", "?");
             }
 
+            // A recurring failure is stored once with a count; without showing it, a save that is
+            // still being refused every 30 seconds reads like a one-off from hours ago.
+            char recurrence[24];
+            if (entry.occurrences > 1)
+                snprintf(recurrence, sizeof(recurrence), " x%lu", static_cast<unsigned long>(entry.occurrences));
+            else
+                recurrence[0] = '\0';
+
             char row[320];
-            snprintf(row, sizeof(row), "  [%s] %-9s acct=%s char=%s%s%s: %s\n\r", when,
+            snprintf(row, sizeof(row), "  [%s]%s %-9s acct=%s char=%s%s%s: %s\n\r", when, recurrence,
                 account_errors::source_name(entry.source),
                 entry.account.empty() ? "?" : entry.account.c_str(),
                 entry.character.empty() ? "?" : entry.character.c_str(),

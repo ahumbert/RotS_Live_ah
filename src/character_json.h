@@ -4,6 +4,7 @@
 #include "structs.h"
 
 #include <array>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -167,10 +168,21 @@ bool deserialize_character_from_json_v2b(const std::string& json, CharacterData*
 // produce something its own reader will not take back, so it is checked directly rather than by
 // re-parsing every save.
 struct NamedKeyCollision {
-    std::string table; // "skill" or "talk"
+    std::string table; // "skill", "talk" or "color"
     std::string key; // the JSON key the entries share
     std::vector<int> indices; // the slots sharing it, ascending
+    // Whether a duplicate of this key makes the READER refuse the whole file. True for skills and
+    // talks, which parse through parse_named_integer_object and its duplicate check. False for
+    // colours: parse_colors_object resolves each key to a slot and assigns, so a duplicate silently
+    // overwrites instead -- a fidelity defect worth reporting at boot, but not a reason to refuse a
+    // player's save.
+    bool duplicate_refuses_the_file = true;
 };
+
+// The scan behind named_key_collisions(), exposed so its behaviour can be tested directly against
+// synthetic tables rather than only against whatever consts.cpp happens to contain today.
+std::vector<NamedKeyCollision> find_key_collisions(const char* table_name, int slot_count,
+    const std::function<std::string(int)>& key_for_index);
 
 // Computed once from the static tables. Empty on a healthy build; boot reports whatever is here.
 const std::vector<NamedKeyCollision>& named_key_collisions();

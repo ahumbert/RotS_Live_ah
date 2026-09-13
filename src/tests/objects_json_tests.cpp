@@ -340,6 +340,29 @@ TEST(ObjectsJson, KeepsALegacyAliasKeywordThatFillsTheEntireFieldReadable)
     EXPECT_EQ(round_tripped.aliases[0].keyword, "nineteen_characters");
 }
 
+TEST(ObjectsJson, ReadsBackAnObjectsFileWrittenWithAnOverlongAliasKeyword)
+{
+    // The binary reader clamps to 19 now, so nothing NEW can produce this. A file written before
+    // that fix can: the JSON writer never length-checked, and migration deleted the legacy .obj
+    // behind it. Refusing the file here costs the character its rent, gold, inventory and worn
+    // equipment for good, when the only thing wrong is one keyword being a character too long.
+    objects_json::ObjectSaveData data = make_object_save_data();
+    data.aliases[0].keyword = "nineteen_characters";
+
+    std::string json = objects_json::serialize_objects_to_json(data);
+    const std::string written = "\"keyword\": \"nineteen_characters\"";
+    const size_t at = json.find(written);
+    ASSERT_NE(at, std::string::npos);
+    json.replace(at, written.size(), "\"keyword\": \"nineteen_characters_x\"");
+
+    objects_json::ObjectSaveData parsed;
+    std::string error_message;
+    ASSERT_TRUE(objects_json::deserialize_objects_from_json(json, &parsed, &error_message)) << error_message;
+    ASSERT_FALSE(parsed.aliases.empty());
+    EXPECT_EQ(parsed.aliases[0].keyword, "nineteen_characters")
+        << "kept to what the game can store, rather than losing the whole file";
+}
+
 TEST(ObjectsJson, RejectsOutOfRangeNarrowedFields)
 {
     objects_json::ObjectSaveData data = make_object_save_data();

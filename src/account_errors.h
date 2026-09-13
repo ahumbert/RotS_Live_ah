@@ -27,7 +27,10 @@ enum class Source {
 };
 
 struct Entry {
-    std::time_t when = 0;
+    std::time_t when = 0; // when it last happened
+    // How many times this exact failure has been recorded. A refused save recurs on every autosave,
+    // so appending each one would overwrite the whole ring with duplicates within the hour.
+    std::size_t occurrences = 1;
     Source source = Source::Boot;
     std::string account;
     std::string character;

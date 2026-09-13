@@ -1925,6 +1925,32 @@ TEST(AccountIndexQuarantine, DoesNotEvictAHealthyRecordAlreadyIndexedAtThatAddre
     account_index::clear();
 }
 
+TEST(AccountIndexQuarantine, KeepsAStrayRecordVisibleWhenItsAddressBelongsToAHealthyOne)
+{
+    // A record in the WRONG BUCKET under the right directory name declares -- and is keyed by -- the
+    // same address as the healthy record. Refusing to evict the healthy entry is right, but silently
+    // dropping the stray one leaves it unindexed, uncounted, and absent from `account index`: the
+    // operator sees one boot log line and nothing else, for a file the game cannot reach.
+    account_index::clear();
+
+    account_index::upsert(make_account("player@example.com", "alpha-admin", { "Aragorn" }),
+        "accounts/P-T/player@example.com/account.json", false);
+
+    account_index::quarantine("player@example.com",
+        "accounts/A-E/player@example.com/account.json", "filed in the wrong bucket");
+
+    std::string record_path;
+    EXPECT_TRUE(account_index::find_path_by_email("player@example.com", &record_path, nullptr));
+    EXPECT_EQ(record_path, "accounts/P-T/player@example.com/account.json")
+        << "the readable record still holds its address";
+
+    EXPECT_TRUE(account_index::is_quarantined_record_key("accounts/A-E/player@example.com/account.json"))
+        << "and the stray one is still reported, filed under its own path";
+    EXPECT_EQ(account_index::quarantined_count(), 1u);
+
+    account_index::clear();
+}
+
 TEST(AccountIndexUpsert, WithdrawsAStrandedAccountNameOnceTheDisputeSettles)
 {
     // Keeping both records' claims while an address is disputed must not strand a key forever.

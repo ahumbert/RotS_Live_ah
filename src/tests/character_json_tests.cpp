@@ -244,6 +244,40 @@ std::string specialization_fragment(int specialization)
     return "\"specialization\": " + std::to_string(specialization);
 }
 
+TEST(CharacterJson, KeyCollisionScanReportsEverySlotSharingAKey)
+{
+    // Tested against synthetic tables rather than only consts.cpp, so the scan is pinned even when
+    // the real tables change.
+    const auto three_way = [](int index) {
+        return (index == 1 || index == 4 || index == 7) ? std::string("shared") : "unique_" + std::to_string(index);
+    };
+    const std::vector<character_json::NamedKeyCollision> found = character_json::find_key_collisions("probe", 9, three_way);
+    ASSERT_EQ(found.size(), 1u);
+    EXPECT_EQ(found[0].table, "probe");
+    EXPECT_EQ(found[0].key, "shared");
+    EXPECT_EQ(found[0].indices, (std::vector<int> { 1, 4, 7 })) << "every slot, in order, not just the first pair";
+    EXPECT_TRUE(found[0].duplicate_refuses_the_file) << "the default is the dangerous reading";
+}
+
+TEST(CharacterJson, KeyCollisionScanFindsNothingInATableWithUniqueNames)
+{
+    const auto unique = [](int index) { return "key_" + std::to_string(index); };
+    EXPECT_TRUE(character_json::find_key_collisions("probe", 32, unique).empty());
+}
+
+TEST(CharacterJson, ColourCollisionsAreReportedButNeverRefuseASave)
+{
+    // parse_colors_object resolves each key to a slot and assigns; unlike skills and talks it has no
+    // duplicate check, so a duplicate colour name silently overwrites rather than making the file
+    // unreadable. It is worth seeing at boot and must not cost anyone their save.
+    for (const character_json::NamedKeyCollision& collision : character_json::named_key_collisions()) {
+        if (collision.table == "color")
+            EXPECT_FALSE(collision.duplicate_refuses_the_file) << "key " << collision.key;
+        else
+            EXPECT_TRUE(collision.duplicate_refuses_the_file) << collision.table << " key " << collision.key;
+    }
+}
+
 TEST(CharacterJson, FindsTheSkillTableEntriesThatShareAJsonKey)
 {
     // consts.cpp carries two skills both named "trash" (125 and 126). Names are what the character

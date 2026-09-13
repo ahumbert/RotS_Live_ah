@@ -355,6 +355,29 @@ TEST(ActWiz, AccountErrorsListsWhatThisBootRecordedNewestFirst)
     free(admin.player.name);
 }
 
+TEST(ActWiz, AccountErrorsShowsHowManyTimesAFailureHasRecurred)
+{
+    // A save refusal repeats every autosave. The row has to say that it is still happening, or a
+    // single collapsed line reads like a one-off from hours ago.
+    account_errors::clear();
+    for (int attempt = 0; attempt < 4; ++attempt)
+        account_errors::record(account_errors::Source::Save, "alpha-admin", "aragorn", "it cannot be read back");
+
+    descriptor_data descriptor = make_descriptor();
+    char_data admin {};
+    admin.desc = &descriptor;
+    admin.player.name = strdup("tester");
+
+    char errors_command[] = "errors";
+    do_account(&admin, errors_command, nullptr, 0, 0);
+    const std::string output = descriptor.small_outbuf;
+
+    EXPECT_NE(output.find("x4"), std::string::npos) << "the row must show the recurrence count: " << output;
+
+    account_errors::clear();
+    free(admin.player.name);
+}
+
 TEST(ActWiz, AccountErrorsSaysSoWhenThisBootHasRecordedNothing)
 {
     // A quiet boot must read as quiet. An empty report that says nothing at all is indistinguishable

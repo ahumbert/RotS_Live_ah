@@ -52,6 +52,25 @@ void record(Source source, const std::string& account, const std::string& charac
     entry.actor = bounded(actor);
     entry.reason = bounded(reason);
 
+    // A failure that recurs is one failure. The save refusal is the case that forces this: it is
+    // permanent for an affected character and Crash_save_all retries every connected player every 30
+    // seconds, so appending each attempt would overwrite the entire ring with one character's
+    // duplicates inside an hour -- destroying the boot and migration history this exists to keep.
+    // Searching the whole ring rather than only the newest entry, because two characters failing at
+    // once would otherwise interleave and defeat the check.
+    for (auto existing = g_entries.begin(); existing != g_entries.end(); ++existing) {
+        if (existing->source != entry.source || existing->account != entry.account
+            || existing->character != entry.character || existing->reason != entry.reason)
+            continue;
+
+        entry.occurrences = existing->occurrences + 1;
+        g_entries.erase(existing);
+        // Re-appended rather than updated in place: a failure still happening is the most recent
+        // news on the server, and `account errors` reads newest first.
+        g_entries.push_back(entry);
+        return;
+    }
+
     g_entries.push_back(entry);
     while (g_entries.size() > MAX_RECORDED_ERRORS)
         g_entries.pop_front();
