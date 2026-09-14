@@ -459,3 +459,165 @@ class SshRunner:
         if self.connected:
             subprocess.run(self.close_args(), capture_output=True)
             self.connected = False
+
+
+# ---------------------------------------------------------------------------------------------
+# The deploy
+# ---------------------------------------------------------------------------------------------
+
+STEP_TITLES = {
+    1: "pull and check",
+    2: "connect",
+    3: "pre-check",
+    4: "backup",
+    5: "upload",
+    6: "source edits",
+    7: "build",
+    8: "tag",
+}
+
+
+def paint(text: str, color: str, enabled: bool) -> str:
+    return f"\033[{color}m{text}\033[0m" if enabled else text
+
+
+def banner(env: Env, server: Server, sha: str, subject: str, help_names: Sequence[str], color: bool) -> str:
+    edits = "; ".join(f"{e.path}: {e.old_line!r} -> {e.new_line!r}" for e in env.source_edits) or "none"
+    return "\n".join([
+        f"Deploying to: {paint(env.name, env.color, color)}  ->  "
+        f"{server.login}:/rots/{paint(env.dir_name, env.color, color)}",
+        f"Commit:       {sha[:7]} {subject}",
+        f"Source edits: {edits}",
+        f"Help files:   {', '.join(help_names)}",
+    ])
+
+
+def failure_report(env: Env, step: int, detail: str, color: bool) -> str:
+    lines = [paint(f"FAILED at step {step} ({STEP_TITLES[step]}): {detail}", BOLD_RED, color)]
+    if step <= 4:
+        lines.append("Nothing was uploaded; the source and help files on the server are unchanged.")
+    elif step == 8:
+        lines.append("The upload and build finished; only the local tag failed.")
+    elif env.backup:
+        lines.append(f"To revert: {revert_command(env)}")
+    else:
+        lines.append(f"{env.name} keeps no backup; to revert, deploy the previous commit.")
+    return "\n".join(lines)
+
+
+def dry_run_plan(env: Env, server: Server, repo: Path, help_names: Sequence[str]) -> str:
+    shell = SshRunner(server, Path(SOCKET_PARENT) / "rots-deploy-XXXXXX")
+
+    def ssh(command: str, tty: bool = False) -> str:
+        return "  " + shlex.join(shell.remote_args(command, tty))
+
+    lines = ["Dry run: nothing below is executed.", f"== 2. {STEP_TITLES[2]}", "  " + shlex.join(shell.connect_args())]
+    lines += [f"== 3. {STEP_TITLES[3]}", ssh(missing_dirs_command(env)), ssh(unwritable_command(env, help_names)),
+              "  only if something is unwritable:", ssh(chown_command(env, server.user, help_names), tty=True)]
+    lines += [f"== 4. {STEP_TITLES[4]}",
+              ssh(backup_command(env, help_names)) if env.backup else "  skipped: this env keeps no backup"]
+    lines += [f"== 5. {STEP_TITLES[5]}", "  " + shlex.join(shell.sftp_args(shell.work_dir / "upload.sftp")),
+              "  batch file:"]
+    lines += ["    " + line for line in sftp_batch(env, repo, help_names).splitlines()]
+    lines += [f"== 6. {STEP_TITLES[6]}"] + ([ssh(source_edit_command(env, e)) for e in env.source_edits] or ["  none"])
+    lines += [f"== 7. {STEP_TITLES[7]}", ssh(build_command(env))]
+    lines += [f"== 8. {STEP_TITLES[8]}",
+              f"  git tag -a {env.tag_prefix}YYYY-MM-DD[-N] <sha>" if env.tag_prefix else "  none: test target"]
+    lines += ["== close", "  " + shlex.join(shell.close_args())]
+    return "\n".join(lines)
+
+
+def _lines(output: str) -> List[str]:
+    return [line for line in output.splitlines() if line.strip()]
+
+
+def deploy(env: Env, server: Server, checkout, runner, *, dry_run: bool, color: bool = False,
+           out: Callable[[str], None] = lambda line: print(line, flush=True),
+           today: Optional[datetime.date] = None) -> int:
+    """Run the deploy steps in order and return the process exit status."""
+    step = 1
+    tag = None
+
+    def begin(number: int) -> None:
+        nonlocal step
+        step = number
+        out(paint(f"== {number}. {STEP_TITLES[number]}", CYAN, color))
+
+    try:
+        begin(1)
+        for warning in checkout.prepare(env, dry_run):
+            out(paint(f"warning: {warning}", YELLOW, color))
+        sha, subject = checkout.head()
+        help_names = checkout.help_files()
+        problems = checkout.help_problems()
+        if problems:
+            raise DeployError("these help files would break in-game help:\n  " + "\n  ".join(problems))
+        out(banner(env, server, sha, subject, help_names, color))
+        if dry_run:
+            out(dry_run_plan(env, server, checkout.repo, help_names))
+            return 0
+
+        begin(2)
+        runner.connect()
+
+        begin(3)
+        runner.remote(missing_dirs_command(env))
+        unwritable = _lines(runner.remote(unwritable_command(env, help_names), capture=True))
+        if unwritable:
+            out(f"Not writable by {server.user}:\n  " + "\n  ".join(unwritable))
+            out("Fixing ownership with sudo chown; sudo may ask for a password.")
+            runner.remote(chown_command(env, server.user, help_names), tty=True)
+            unwritable = _lines(runner.remote(unwritable_command(env, help_names), capture=True))
+            if unwritable:
+                raise DeployError("still not writable after chown:\n  " + "\n  ".join(unwritable))
+
+        begin(4)
+        if env.backup:
+            runner.remote(backup_command(env, help_names))
+        else:
+            out(f"{env.name} keeps no backup; skipping.")
+
+        begin(5)
+        runner.sftp(sftp_batch(env, checkout.repo, help_names))
+
+        begin(6)
+        if not env.source_edits:
+            out("none")
+        for edit in env.source_edits:
+            runner.remote(source_edit_command(env, edit))
+
+        begin(7)
+        runner.remote(build_command(env))
+
+        begin(8)
+        if env.tag_prefix:
+            tag = checkout.create_tag(env, sha, help_names, today or datetime.date.today())
+            out(f"Tagged {sha[:7]} as {tag} (local only).")
+        else:
+            out(f"{env.name} is a test target; no tag.")
+    except DeployError as error:
+        out(failure_report(env, step, str(error), color))
+        return 1
+    except KeyboardInterrupt:
+        out(failure_report(env, step, "interrupted", color))
+        return 130
+    finally:
+        runner.close()
+
+    out(paint(f"Deployed {sha[:7]} to {env.name}.", GREEN, color)
+        + (f" Tag: {tag}." if tag else "") + " Restart the port to run the new build.")
+    return 0
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    user, host = args.login
+    server = Server(user, host, args.port)
+    color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+    with tempfile.TemporaryDirectory(prefix="rots-deploy-", dir=SOCKET_PARENT) as work_dir:
+        runner = SshRunner(server, Path(work_dir))
+        return deploy(ENVS[args.env], server, Checkout(REPO_ROOT), runner, dry_run=args.dry_run, color=color)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

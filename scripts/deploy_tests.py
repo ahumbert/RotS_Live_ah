@@ -605,5 +605,219 @@ class RunCommandTest(unittest.TestCase):
             deploy.run_command([sys.executable, "-c", "import sys; print('oops'); sys.exit(3)"], "thing", capture=True)
 
 
+# ---------------------------------------------------------------------------------------------
+# The deploy
+# ---------------------------------------------------------------------------------------------
+
+
+class FakeCheckout:
+    repo = Path("/home/me/RotS")
+
+    def __init__(self, problems=(), warnings=()) -> None:
+        self.problems = list(problems)
+        self.warnings = list(warnings)
+        self.prepared = []
+        self.tags = []
+
+    def prepare(self, env, dry_run):
+        self.prepared.append(dry_run)
+        return self.warnings
+
+    def head(self):
+        return "abc1234def5678", "Merge pull request #300"
+
+    def help_files(self):
+        return ["help", "help_tbl"]
+
+    def help_problems(self):
+        return self.problems
+
+    def create_tag(self, env, sha, help_names, day):
+        self.tags.append((env.name, sha, list(help_names), day))
+        return f"{env.tag_prefix}{day.isoformat()}"
+
+
+class FakeRunner:
+    def __init__(self, fail_when=lambda call: False, unwritable=("",)) -> None:
+        self.calls = []
+        self.fail_when = fail_when
+        self.unwritable = list(unwritable)
+
+    def _record(self, call):
+        self.calls.append(call)
+        if self.fail_when(call):
+            raise deploy.DeployError("boom")
+
+    def connect(self):
+        self._record(("connect",))
+
+    def remote(self, command, capture=False, tty=False):
+        self._record(("remote", command, tty))
+        if capture:
+            return self.unwritable.pop(0) if len(self.unwritable) > 1 else self.unwritable[0]
+        return ""
+
+    def sftp(self, batch):
+        self._record(("sftp", batch))
+
+    def close(self):
+        self.calls.append(("close",))
+
+    def kinds(self):
+        labels = []
+        for call in self.calls:
+            if call[0] != "remote":
+                labels.append(call[0])
+            elif "sudo chown" in call[1]:
+                labels.append("chown")
+            elif "backup.new" in call[1]:
+                labels.append("backup")
+            elif "! -writable" in call[1]:
+                labels.append("unwritable")
+            elif "missing directory" in call[1]:
+                labels.append("dirs")
+            elif "sed -i" in call[1]:
+                labels.append("edit")
+            elif "make all" in call[1]:
+                labels.append("build")
+            else:
+                labels.append("remote?")
+        return labels
+
+
+class DeployTest(unittest.TestCase):
+    DAY = datetime.date(2026, 9, 13)
+
+    def run_deploy(self, env_name, checkout=None, runner=None, dry_run=False):
+        self.checkout = checkout or FakeCheckout()
+        self.runner = runner or FakeRunner()
+        self.output = []
+        status = deploy.deploy(deploy.ENVS[env_name], SERVER, self.checkout, self.runner, dry_run=dry_run,
+                               out=self.output.append, today=self.DAY)
+        return status
+
+    def text(self):
+        return "\n".join(self.output)
+
+    def test_successful_deploy_runs_every_step_in_order_and_tags(self) -> None:
+        status = self.run_deploy("test")
+
+        self.assertEqual(status, 0)
+        self.assertEqual(self.runner.kinds(), ["connect", "dirs", "unwritable", "backup", "sftp", "build", "close"])
+        self.assertEqual(self.checkout.tags, [("test", "abc1234def5678", ["help", "help_tbl"], self.DAY)])
+        self.assertEqual(self.checkout.prepared, [False])
+        self.assertIn("Tag: test-2026-09-13.", self.text())
+        self.assertIn("someone@example.org:/rots/dev-building4802", self.text())
+
+    def test_4k_edits_the_source_after_upload_and_before_build(self) -> None:
+        self.assertEqual(self.run_deploy("4k"), 0)
+
+        self.assertEqual(self.runner.kinds(), ["connect", "dirs", "unwritable", "backup", "sftp", "edit", "build", "close"])
+        self.assertIn("USE_BIG_BROTHER", self.text())
+
+    def test_coders_skips_the_backup(self) -> None:
+        self.assertEqual(self.run_deploy("coders"), 0)
+
+        self.assertNotIn("backup", self.runner.kinds())
+
+    def test_test_target_is_not_tagged(self) -> None:
+        self.assertEqual(self.run_deploy("zzz-forge-test"), 0)
+
+        self.assertEqual(self.checkout.tags, [])
+
+    def test_help_problems_stop_before_connecting(self) -> None:
+        status = self.run_deploy("live", checkout=FakeCheckout(problems=["lib/text/help_tbl:92: bad"]))
+
+        self.assertEqual(status, 1)
+        self.assertEqual(self.runner.kinds(), ["close"])
+        self.assertIn("lib/text/help_tbl:92: bad", self.text())
+        self.assertIn("FAILED at step 1", self.text())
+
+    def test_failed_pre_check_uploads_nothing(self) -> None:
+        runner = FakeRunner(fail_when=lambda call: call[0] == "remote" and "missing directory" in call[1])
+
+        self.assertEqual(self.run_deploy("test", runner=runner), 1)
+
+        self.assertEqual(self.runner.kinds(), ["connect", "dirs", "close"])
+        self.assertIn("FAILED at step 3", self.text())
+        self.assertIn("Nothing was uploaded", self.text())
+        self.assertEqual(self.checkout.tags, [])
+
+    def test_unwritable_files_are_chowned_with_a_tty_then_rechecked(self) -> None:
+        runner = FakeRunner(unwritable=["/rots/dev-building4802/src/game.cpp\n", ""])
+
+        self.assertEqual(self.run_deploy("test", runner=runner), 0)
+
+        self.assertEqual(self.runner.kinds()[:5], ["connect", "dirs", "unwritable", "chown", "unwritable"])
+        chown = [call for call in self.runner.calls if call[0] == "remote" and "sudo chown" in call[1]][0]
+        self.assertTrue(chown[2])
+        self.assertIn("/rots/dev-building4802/src/game.cpp", self.text())
+
+    def test_still_unwritable_after_chown_stops_before_backup(self) -> None:
+        runner = FakeRunner(unwritable=["/rots/dev-building4802/src/game.cpp\n"])
+
+        self.assertEqual(self.run_deploy("test", runner=runner), 1)
+
+        self.assertNotIn("backup", self.runner.kinds())
+        self.assertIn("still not writable", self.text())
+
+    def test_failed_upload_prints_the_revert_command_and_closes(self) -> None:
+        runner = FakeRunner(fail_when=lambda call: call[0] == "sftp")
+
+        self.assertEqual(self.run_deploy("test", runner=runner), 1)
+
+        self.assertEqual(self.runner.kinds()[-1], "close")
+        self.assertIn("FAILED at step 5", self.text())
+        self.assertIn(deploy.revert_command(deploy.ENVS["test"]), self.text())
+        self.assertEqual(self.checkout.tags, [])
+
+    def test_failed_build_on_coders_says_there_is_no_backup(self) -> None:
+        runner = FakeRunner(fail_when=lambda call: call[0] == "remote" and "make all" in call[1])
+
+        self.assertEqual(self.run_deploy("coders", runner=runner), 1)
+
+        self.assertIn("keeps no backup", self.text())
+
+    def test_interrupt_closes_the_connection(self) -> None:
+        runner = FakeRunner()
+        runner.connect = mock.Mock(side_effect=KeyboardInterrupt)
+
+        self.assertEqual(self.run_deploy("test", runner=runner), 130)
+
+        self.assertEqual(self.runner.kinds(), ["close"])
+        self.assertIn("FAILED at step 2 (connect): interrupted", self.text())
+
+    def test_dry_run_prints_every_step_and_runs_nothing_remote(self) -> None:
+        for name in deploy.ENVS:
+            with self.subTest(env=name):
+                self.assertEqual(self.run_deploy(name, dry_run=True), 0)
+
+                self.assertEqual(self.runner.kinds(), ["close"])
+                self.assertEqual(self.checkout.prepared, [True])
+                self.assertEqual(self.checkout.tags, [])
+                for number in range(2, 9):
+                    self.assertIn(f"== {number}. {deploy.STEP_TITLES[number]}", self.text())
+                self.assertIn("ssh -M -S", self.text())
+                self.assertIn('put "help_tbl"', self.text())
+
+    def test_warnings_are_shown(self) -> None:
+        self.run_deploy("zzz-forge-test", checkout=FakeCheckout(warnings=["on 'feat/x'"]))
+
+        self.assertIn("warning: on 'feat/x'", self.text())
+
+
+class MainTest(unittest.TestCase):
+    def test_wires_arguments_into_deploy(self) -> None:
+        with mock.patch.object(deploy, "deploy", return_value=0) as run:
+            self.assertEqual(deploy.main(["deploy", "4k", "someone@example.org", "2222", "--dry-run"]), 0)
+
+        env, server, checkout, runner = run.call_args.args
+        self.assertEqual(env, deploy.ENVS["4k"])
+        self.assertEqual(server, SERVER)
+        self.assertEqual(checkout.repo, deploy.REPO_ROOT)
+        self.assertTrue(str(runner.socket).startswith("/tmp/rots-deploy-"))
+        self.assertTrue(run.call_args.kwargs["dry_run"])
+
+
 if __name__ == "__main__":
     unittest.main()
