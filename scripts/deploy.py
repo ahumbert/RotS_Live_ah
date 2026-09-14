@@ -405,3 +405,57 @@ def revert_command(env: Env) -> str:
         f"cd {q(base + '/src')} && cp -p backup/lib-text/* {q(base + '/' + HELP_DIR)}/ && "
         "find backup -mindepth 1 -maxdepth 1 ! -name lib-text -exec cp -rp -t . {} + && make all -j6"
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# Running commands
+# ---------------------------------------------------------------------------------------------
+
+
+def run_command(args: Sequence[str], what: str, capture: bool = False) -> str:
+    result = subprocess.run(list(args), text=True, capture_output=capture)
+    if result.returncode != 0:
+        detail = (result.stdout + result.stderr).strip() if capture else ""
+        raise DeployError(f"{what} exited with status {result.returncode}" + (f": {detail}" if detail else ""))
+    return result.stdout if capture else ""
+
+
+class SshRunner:
+    """Runs the remote steps over one OpenSSH master connection, so the password is asked once."""
+
+    def __init__(self, server: Server, work_dir: Path):
+        self.server = server
+        self.work_dir = work_dir
+        self.socket = work_dir / "ssh-master"
+        self.connected = False
+
+    def connect_args(self) -> List[str]:
+        return ["ssh", "-M", "-S", str(self.socket), "-fN", "-p", str(self.server.port), self.server.login]
+
+    def remote_args(self, command: str, tty: bool = False) -> List[str]:
+        return ["ssh", "-S", str(self.socket), *(["-t"] if tty else []), "-p", str(self.server.port),
+                self.server.login, command]
+
+    def sftp_args(self, batch_path: Path) -> List[str]:
+        return ["sftp", "-o", f"ControlPath={self.socket}", "-P", str(self.server.port), "-b", str(batch_path),
+                self.server.login]
+
+    def close_args(self) -> List[str]:
+        return ["ssh", "-S", str(self.socket), "-O", "exit", "-p", str(self.server.port), self.server.login]
+
+    def connect(self) -> None:
+        run_command(self.connect_args(), "ssh connection")
+        self.connected = True
+
+    def remote(self, command: str, capture: bool = False, tty: bool = False) -> str:
+        return run_command(self.remote_args(command, tty), "remote command", capture=capture)
+
+    def sftp(self, batch: str) -> None:
+        batch_path = self.work_dir / "upload.sftp"
+        batch_path.write_text(batch)
+        run_command(self.sftp_args(batch_path), "sftp upload")
+
+    def close(self) -> None:
+        if self.connected:
+            subprocess.run(self.close_args(), capture_output=True)
+            self.connected = False

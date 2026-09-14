@@ -553,5 +553,57 @@ class SftpBatchTest(unittest.TestCase):
         ]) + "\n")
 
 
+# ---------------------------------------------------------------------------------------------
+# Running commands
+# ---------------------------------------------------------------------------------------------
+
+
+class SshRunnerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.runner = deploy.SshRunner(SERVER, Path("/tmp/rots-deploy-test"))
+
+    def test_connect_opens_a_master_connection(self) -> None:
+        self.assertEqual(self.runner.connect_args(), ["ssh", "-M", "-S", "/tmp/rots-deploy-test/ssh-master", "-fN",
+                                                      "-p", "2222", "someone@example.org"])
+
+    def test_remote_reuses_the_master_and_can_request_a_tty(self) -> None:
+        self.assertEqual(self.runner.remote_args("make"), ["ssh", "-S", "/tmp/rots-deploy-test/ssh-master", "-p", "2222",
+                                                           "someone@example.org", "make"])
+        self.assertEqual(self.runner.remote_args("sudo true", tty=True)[3], "-t")
+
+    def test_sftp_reuses_the_master(self) -> None:
+        self.assertEqual(self.runner.sftp_args(Path("/tmp/b")), ["sftp", "-o",
+                         "ControlPath=/tmp/rots-deploy-test/ssh-master", "-P", "2222", "-b", "/tmp/b",
+                         "someone@example.org"])
+
+    def test_sftp_writes_the_batch_file_and_runs_it(self) -> None:
+        with tempfile.TemporaryDirectory() as work_dir:
+            runner = deploy.SshRunner(SERVER, Path(work_dir))
+            with mock.patch.object(deploy, "run_command") as run:
+                runner.sftp("put -r *\n")
+
+            batch_path = Path(work_dir) / "upload.sftp"
+            run.assert_called_once_with(runner.sftp_args(batch_path), "sftp upload")
+            self.assertEqual(batch_path.read_text(), "put -r *\n")
+
+    def test_close_only_runs_after_connecting(self) -> None:
+        with mock.patch.object(deploy.subprocess, "run") as run:
+            self.runner.close()
+            run.assert_not_called()
+            self.runner.connected = True
+            self.runner.close()
+            run.assert_called_once()
+            self.assertFalse(self.runner.connected)
+
+
+class RunCommandTest(unittest.TestCase):
+    def test_returns_captured_output(self) -> None:
+        self.assertEqual(deploy.run_command([sys.executable, "-c", "print('hello')"], "hello", capture=True), "hello\n")
+
+    def test_failure_raises_with_status_and_output(self) -> None:
+        with self.assertRaisesRegex(deploy.DeployError, "thing exited with status 3: oops"):
+            deploy.run_command([sys.executable, "-c", "import sys; print('oops'); sys.exit(3)"], "thing", capture=True)
+
+
 if __name__ == "__main__":
     unittest.main()
