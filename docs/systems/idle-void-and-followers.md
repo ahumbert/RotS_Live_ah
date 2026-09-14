@@ -63,8 +63,17 @@ followers, and the final idle save writes no follower section at all.
 - **The idle save does not reach the account `objects.json`.** `refresh_account_backed_object_file`
   copies the save through the strict reader, which requires a follower section, so the copy fails
   (SYSERR) and `objects.json` keeps the last 30-second save. Because that save already has no
-  followers, the next login is the same either way; only the rent code/time and anything that
-  changed in the last 30 s differ. 231 live `.obj` files are in this rent-code-5 shape.
+  followers, followers come back the same way either way. **Unrentable items do not:**
+  `Crash_idlesave` destroys keys and `ITEM_NORENT` items (`Crash_extract_norents`) before saving,
+  but the 30-second save keeps them (`Crash_save` does not filter), and selection loads
+  `objects.json` and deletes the idle save. Confirmed live 2026-09-14: an account character idled
+  out carrying a key, a no-rent item and a plain ring, and logged back in with all three — the
+  legacy path returns only the ring. **This was a bug, not historic behaviour, and is fixed:**
+  `write_linked_character_object_file` (the save-copy path) now reads the save with the tolerant
+  reader, which forgives only a follower section missing entirely, so the idle save reaches
+  `objects.json`. `write_account_object_file` stays strict for direct writes. Covered by
+  `AccountManagement.LinkedCharacterObjectRefreshAcceptsAnIdleSaveWithoutFollowerSection`. 231 live
+  `.obj` files are in the rent-code-5 shape.
 - **Loading a save with no follower section closes the file twice** — `Crash_follower_load` fcloses
   on the failed read (`objsave.cpp:960`) and `load_character` fcloses again (`:762`). Unverified at
   runtime.
