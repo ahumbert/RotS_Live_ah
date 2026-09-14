@@ -88,8 +88,7 @@ Examples:
 > color roomname fg ansi bright yellow
 > color chat bg default
 
-RGB values must be between 0 and 255. Hex values must look like
-#RRGGBB.
+RGB values must be between 0 and 255. Hex values must look like #RRGGBB.
 
 If your terminal does not fully support true colour, these colours may
 not display exactly as chosen.
