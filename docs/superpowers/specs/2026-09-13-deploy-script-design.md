@@ -1,7 +1,7 @@
 # Deploy Script — Design
 
 Date: 2026-09-13
-Status: **Design, approved in discussion. No implementation plan yet.**
+Status: **Implemented on feat/deploy-script; manual verification on zzz-forge-test pending.**
 Branch: `feat/deploy-script` (worktree `~/u/games/RotS_Live_deploy-script`), based on
 `release-frodo` (a482ac7).
 
@@ -169,6 +169,8 @@ remote command string is built with `shlex.quote`.
    previous tag (latest existing `<prefix>*` tag) and this commit
    (`git diff --name-only <prev> <sha> -- <help files>`), or `none`, or `first tagged deploy` when
    there is no previous tag. `git show <tag>` therefore tells whether a deploy carried help updates.
+   A help file deleted from the repo since the previous tag is not listed as a help change (and, per
+   **Scope**, it is not deleted on the server either).
 9. **Close and report.** Always close the master connection (`ssh -S <socket> -O exit`) and delete the
    temp directory, including after a failure or Ctrl-C. Print either success with the tag name, or
    the failed step plus a revert hint:

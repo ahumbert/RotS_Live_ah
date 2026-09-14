@@ -50,6 +50,24 @@ These are deliberate and small; they do not change any agreed behavior.
    because they are never uploaded; untracked or ignored files inside `src/` still stop the deploy.
 3. When a test target is deployed from a branch other than `release-frodo`, the pull is skipped
    (a feature branch may have no upstream) and the warning says so.
+4. The backup step copies with `find -exec cp -rp -t backup.new {} +` rather than the spec's
+   `find -exec cp -rp {} backup.new/ \;`, so a single failed copy makes the whole `find` fail and
+   stop the backup; the `\;` form runs `cp` once per file and would hide a failure in the middle.
+5. The revert command restores help files with `find backup/lib-text -mindepth 1 -maxdepth 1 -exec
+   cp -p -t <port>/lib/text {} +` (a bare `cp backup/lib-text/*` fails when the backup has no help
+   files at all), restores everything else from `backup` while skipping `lib-text`, touches the
+   restored `.o` files so `make` always relinks even when `../bin/ageland` is newer than the
+   restored objects, and clears the `src/DEPLOY_IN_PROGRESS` marker as its last step.
+6. The source edit step checks line counts with `grep -cxF` (fixed-string, whole-line) rather than
+   a regex match, so a line that happens to contain sed/regex metacharacters cannot change what
+   "exactly one line" means.
+7. Envs with a backup write a `src/DEPLOY_IN_PROGRESS` marker before uploading and clear it after a
+   successful build; the next deploy to that env refuses to run (at the pre-check step) while the
+   marker is present, so a failed or interrupted deploy cannot overwrite the only good backup.
+8. Every remote command runs as `sh -c '<command>'` rather than as the raw trailing ssh argument, so
+   it does not depend on the server's login shell (which may not be bash) to parse it.
+9. `<user>` and `<host>` are restricted to `[A-Za-z0-9._-]`, with no leading `-`, so the login
+   argument cannot be misread as an ssh option (e.g. `-oProxyCommand=...`).
 
 ## File Structure
 
@@ -1876,12 +1894,22 @@ This task is run **with Andrew at the terminal**: he types the ssh password, and
 `<user>@<host> <ssh-port>` (from his own notes — do not write them into any file). Every command
 targets `zzz-forge-test` or `zzz-forge-test-4k` only. Stop and report at the first surprise.
 
+The manual test count and expectations elsewhere in this plan predate the final-review fix wave and
+may be stale; the automated suite size to expect is whatever `python3 scripts/deploy_tests.py`
+reports after those fixes.
+
 **Files:** none changed unless a bug is found (then fix it with a failing test first, as in Tasks 1–6).
 
 **Prerequisites:**
 - The `lib/text/help_tbl:92` fix is merged to `release-frodo` and `feat/deploy-script` is rebased onto it.
 - `/rots/zzz-forge-test` exists on the server with `src`, `bin`, and `lib/text` (Andrew created `src`;
   `bin` and `lib/text` may need `mkdir`, or `make setup` from `src`).
+- Before trusting step 3's `sudo chown` on any real port (not part of this task, but before it is ever
+  run against one): on the server record the service users (`systemctl show -p User rotslive
+  rotsbuilding rotscoding`) and the owner/group/mode of each port's `src`, `bin`, and `lib/text`
+  (`stat -c '%U:%G %a %n' ...`). If a service runs as a different user and relies on owning those
+  directories, stop and redesign the ownership fix (e.g. `chgrp`/`chmod g+w`) before deploying to a
+  real port.
 
 - [ ] **Step 1: Dry run every env**
 
@@ -1923,7 +1951,24 @@ On a throwaway local commit, add a line `#oops` to the middle of `lib/text/scr_t
 Expected: `FAILED at step 1` naming `lib/text/scr_tbl:<line>`, and no password prompt. Then drop the
 throwaway commit (`git reset --hard HEAD~1` on the feature branch — confirm `git log` first).
 
-- [ ] **Step 7: Report**
+- [ ] **Step 7: Revert drill**
+
+Deploy `zzz-forge-test`. On a throwaway local commit, change a source file and a help file, then
+deploy `zzz-forge-test` again. Run the revert command the tool would print on failure (or the one
+from `deploy.revert_command`) on the server.
+Expected: `bin/ageland` was relinked (its mtime changed), the source and help files are back to the
+previous deploy's contents, and `src/DEPLOY_IN_PROGRESS` is gone afterward. Then drop the throwaway
+commit.
+
+- [ ] **Step 8: Interrupted-deploy drill**
+
+Run `deploy zzz-forge-test` and press Ctrl-C during step 5 or step 7.
+Expected: the failure report is shown, including the `src/DEPLOY_IN_PROGRESS` warning (and, if
+interrupted at step 7, the "remote make may still be running" line). Run `deploy zzz-forge-test`
+again and confirm it stops at step 3 on the marker. Run the printed revert command, then run
+`deploy zzz-forge-test` once more and confirm it proceeds normally.
+
+- [ ] **Step 9: Report**
 
 Summarize for Andrew which steps passed, anything surprising, and whether he considers the script
 proven for the real ports. Do not run it against any real port as part of this plan.
