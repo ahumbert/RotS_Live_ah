@@ -376,8 +376,8 @@ namespace {
     }
 
     // `converted_source`, when given, receives what was parsed from the legacy .obj so the caller can
-    // verify the written file against it. Untouched when there is no legacy file: the default file
-    // written then replaces nothing, so there is nothing to verify.
+    // verify the written file against it. Untouched when there is no legacy file: a default file is
+    // written instead, and the caller only checks that it reads back.
     bool hydrate_account_native_object_file_from_migration(const std::string& root_directory, const std::string& account_name, const std::string& character_name, const CharacterMigrationData& snapshot_data, std::string* error_message, objects_json::ObjectSaveData* converted_source = nullptr)
     {
         if (!snapshot_data.object_file.present)
@@ -744,6 +744,40 @@ namespace {
         return true;
     }
 
+    // A character with no legacy .obj gets a default file instead. It holds nothing to lose, but login
+    // refuses a character whose account object file exists and will not read
+    // (load_object_save_bytes_for_character), and the player file is retired straight after -- so it
+    // must at least read back. Its contents are not compared: that would mean a second copy of what
+    // write_default_account_object_file writes, which new-character creation shares.
+    bool verify_default_object_file_reads_back(const std::string& root_directory, const std::string& account_name, const std::string& character_name, std::string* error_message)
+    {
+        std::string object_bytes;
+        std::string read_error;
+        if (!read_account_object_file(root_directory, account_name, character_name, &object_bytes, &read_error)) {
+            set_error(error_message, "Default object file for '" + character_name + "' cannot be read back: " + read_error);
+            return false;
+        }
+
+        return true;
+    }
+
+    // The same for a default exploits file, which is an empty list, so checking that is free.
+    bool verify_default_exploit_file_reads_back_empty(const std::string& root_directory, const std::string& account_name, const std::string& character_name, std::string* error_message)
+    {
+        std::vector<exploit_record> readback;
+        std::string read_error;
+        if (!read_account_exploit_file(root_directory, account_name, character_name, &readback, &read_error)) {
+            set_error(error_message, "Default exploit file for '" + character_name + "' cannot be read back: " + read_error);
+            return false;
+        }
+        if (!readback.empty()) {
+            set_error(error_message, "Default exploit file for '" + character_name + "' is not empty: it holds " + std::to_string(readback.size()) + " record(s).");
+            return false;
+        }
+
+        return true;
+    }
+
     // And for the exploits file, read back through the reader login uses.
     bool verify_converted_exploit_file(const std::string& root_directory, const std::string& account_name, const std::string& character_name, const std::vector<exploit_record>& source, std::string* error_message)
     {
@@ -808,7 +842,10 @@ namespace {
             roll_back_account_native_outputs();
             return false;
         }
-        if (snapshot_data.object_file.present && !verify_converted_object_file(root_directory, account_name, character_name, converted_objects, error_message)) {
+        const bool object_file_verified = snapshot_data.object_file.present
+            ? verify_converted_object_file(root_directory, account_name, character_name, converted_objects, error_message)
+            : verify_default_object_file_reads_back(root_directory, account_name, character_name, error_message);
+        if (!object_file_verified) {
             roll_back_account_native_outputs();
             return false;
         }
@@ -817,7 +854,10 @@ namespace {
             roll_back_account_native_outputs();
             return false;
         }
-        if (snapshot_data.exploits_file.present && !verify_converted_exploit_file(root_directory, account_name, character_name, converted_exploits, error_message)) {
+        const bool exploit_file_verified = snapshot_data.exploits_file.present
+            ? verify_converted_exploit_file(root_directory, account_name, character_name, converted_exploits, error_message)
+            : verify_default_exploit_file_reads_back_empty(root_directory, account_name, character_name, error_message);
+        if (!exploit_file_verified) {
             roll_back_account_native_outputs();
             return false;
         }
