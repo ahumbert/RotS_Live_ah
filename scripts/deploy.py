@@ -401,15 +401,22 @@ def _sed_replacement(text: str) -> str:
 
 
 def source_edit_command(env: Env, edit: SourceEdit) -> str:
+    """Swap one exact line, counting a line with or without a trailing CR as a match.
+
+    Many files in src/ are stored with CRLF line endings, so the uploaded copy's lines end in "\\r";
+    the edit keeps whichever ending the line had.
+    """
     path = q(f"{port_dir(env)}/src/{edit.path}")
     old, new = q(edit.old_line), q(edit.new_line)
-    script = q(f"s/^{_sed_pattern(edit.old_line)}$/{_sed_replacement(edit.new_line)}/")
+    script = q(f"s/^{_sed_pattern(edit.old_line)}\\(\\r\\{{0,1\\}}\\)$/{_sed_replacement(edit.new_line)}\\1/")
     expected_old = q(f"{edit.path}: expected exactly one line: {edit.old_line}")
     expected_new = q(f"{edit.path}: the edit did not leave exactly one line: {edit.new_line}")
     return (
-        f'[ "$(grep -cxF -- {old} {path})" = 1 ] || {{ echo {expected_old}; exit 1; }}; '
+        f"cr=$(printf '\\r'); "
+        f'count() {{ grep -cxF -e "$1" -e "$1$cr" {path}; }}; '
+        f'[ "$(count {old})" = 1 ] || {{ echo {expected_old}; exit 1; }}; '
         f"sed -i {script} {path} && "
-        f'[ "$(grep -cxF -- {new} {path})" = 1 ] && [ "$(grep -cxF -- {old} {path})" = 0 ] || '
+        f'[ "$(count {new})" = 1 ] && [ "$(count {old})" = 0 ] || '
         f"{{ echo {expected_new}; exit 1; }}"
     )
 

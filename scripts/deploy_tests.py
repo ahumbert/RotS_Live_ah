@@ -584,6 +584,35 @@ class SourceEditCommandTest(RemoteCommandTestCase):
         self.assertNotEqual(self.sh(self.command).returncode, 0)
         self.assertEqual(self.header.read_text(), original)
 
+    def test_turns_big_brother_off_in_a_crlf_file_and_keeps_its_line_endings(self) -> None:
+        # src/big_brother.h is stored in git with CRLF line endings, so the uploaded copy ends in "\r\n".
+        self.header.write_bytes(b"#ifndef USE_BIG_BROTHER\r\n#define USE_BIG_BROTHER 1\r\n#endif\r\n")
+
+        result = self.sh(self.command)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.header.read_bytes(), b"#ifndef USE_BIG_BROTHER\r\n#define USE_BIG_BROTHER 0\r\n#endif\r\n")
+
+    def test_stops_without_editing_when_a_crlf_file_is_already_changed(self) -> None:
+        original = b"#define USE_BIG_BROTHER 0\r\n"
+        self.header.write_bytes(original)
+
+        result = self.sh(self.command)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expected exactly one line: #define USE_BIG_BROTHER 1", result.stdout)
+        self.assertEqual(self.header.read_bytes(), original)
+
+    def test_edits_the_real_header_from_the_repo(self) -> None:
+        self.header.write_bytes((deploy.REPO_ROOT / "src" / "big_brother.h").read_bytes())
+
+        result = self.sh(self.command)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = self.header.read_bytes().splitlines()
+        self.assertEqual(lines.count(b"#define USE_BIG_BROTHER 0\r") + lines.count(b"#define USE_BIG_BROTHER 0"), 1)
+        self.assertNotIn(b"#define USE_BIG_BROTHER 1", self.header.read_bytes())
+
 
 class BuildCommandTest(RemoteCommandTestCase):
     def test_passes_when_make_rebuilds_the_binary(self) -> None:
