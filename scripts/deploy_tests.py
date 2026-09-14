@@ -469,6 +469,34 @@ class ChownCommandTest(unittest.TestCase):
         self.assertIn("sudo chown someone /rots/zzz-forge-test/lib/text", command)
 
 
+@unittest.skipIf(os.geteuid() == 0, "root can write everything")
+class ChmodOwnedCommandTest(RemoteCommandTestCase):
+    def test_makes_owned_read_only_files_and_dirs_writable_without_sudo(self) -> None:
+        game = self.root / "src" / "game.cpp"
+        help_table = self.root / "lib" / "text" / "help_tbl"
+        text_dir = self.root / "lib" / "text"
+        game.chmod(0o444)
+        help_table.chmod(0o444)
+        text_dir.chmod(0o555)
+        self.addCleanup(text_dir.chmod, 0o755)
+        command = deploy.chmod_owned_command(TEST_ENV, ["help_tbl", "not_there_tbl"])
+
+        result = self.sh(command)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("sudo", command)
+        for path in (game, help_table, text_dir):
+            self.assertTrue(os.access(path, os.W_OK), path)
+        self.assertEqual(self.sh(deploy.unwritable_command(TEST_ENV, ["help_tbl"])).stdout, "")
+
+    def test_leaves_writable_files_alone(self) -> None:
+        before = (self.root / "src" / "game.cpp").stat().st_mode
+
+        self.assertEqual(self.sh(deploy.chmod_owned_command(TEST_ENV, ["help_tbl"])).returncode, 0)
+
+        self.assertEqual((self.root / "src" / "game.cpp").stat().st_mode, before)
+
+
 class BackupCommandTest(RemoteCommandTestCase):
     def test_copies_src_and_help_files_keeping_timestamps(self) -> None:
         stamp = time.time() - 3600
@@ -838,6 +866,8 @@ class FakeRunner:
                 labels.append("finish")
             elif deploy.DEPLOY_MARKER in call[1]:
                 labels.append("unfinished")
+            elif "chmod u+w" in call[1]:
+                labels.append("chmod")
             elif "sudo chown" in call[1]:
                 labels.append("chown")
             elif "backup.new" in call[1]:
@@ -924,22 +954,39 @@ class DeployTest(unittest.TestCase):
         self.assertIn("FAILED at step 3", self.text())
         self.assertEqual(self.checkout.tags, [])
 
-    def test_unwritable_files_are_chowned_with_a_tty_then_rechecked(self) -> None:
+    def test_owned_read_only_files_are_fixed_with_chmod_and_no_sudo(self) -> None:
         runner = FakeRunner(unwritable=["/rots/dev-building4802/src/game.cpp\n", ""])
 
         self.assertEqual(self.run_deploy("test", runner=runner), 0)
 
-        self.assertEqual(self.runner.kinds()[:6],
-                         ["connect", "dirs", "unfinished", "unwritable", "chown", "unwritable"])
+        self.assertEqual(self.runner.kinds()[:7],
+                         ["connect", "dirs", "unfinished", "unwritable", "chmod", "unwritable", "backup"])
+        self.assertNotIn("chown", self.runner.kinds())
+        self.assertNotIn("sudo may ask for a password", self.text())
+        self.assertIn("Fixed with chmod u+w; no sudo needed.", self.text())
+        chmod = [call for call in self.runner.calls if call[0] == "remote" and "chmod u+w" in call[1]][0]
+        self.assertFalse(chmod[2])
+        self.assertIn("/rots/dev-building4802/src/game.cpp", self.text())
+
+    def test_files_chmod_cannot_fix_are_chowned_with_a_tty_then_chmodded_and_rechecked(self) -> None:
+        runner = FakeRunner(unwritable=["/rots/dev-building4802/src/game.cpp\n",
+                                        "/rots/dev-building4802/src/game.cpp\n", ""])
+
+        self.assertEqual(self.run_deploy("test", runner=runner), 0)
+
+        self.assertEqual(self.runner.kinds()[:10],
+                         ["connect", "dirs", "unfinished", "unwritable", "chmod", "unwritable", "chown", "chmod",
+                          "unwritable", "backup"])
         chown = [call for call in self.runner.calls if call[0] == "remote" and "sudo chown" in call[1]][0]
         self.assertTrue(chown[2])
-        self.assertIn("/rots/dev-building4802/src/game.cpp", self.text())
+        self.assertIn("sudo may ask for a password", self.text())
 
     def test_still_unwritable_after_chown_stops_before_backup(self) -> None:
         runner = FakeRunner(unwritable=["/rots/dev-building4802/src/game.cpp\n"])
 
         self.assertEqual(self.run_deploy("test", runner=runner), 1)
 
+        self.assertIn("chown", self.runner.kinds())
         self.assertNotIn("backup", self.runner.kinds())
         self.assertIn("still not writable", self.text())
 
@@ -998,6 +1045,7 @@ class DeployTest(unittest.TestCase):
                 self.assertIn("ssh -M -S", self.text())
                 self.assertIn('put "help_tbl"', self.text())
                 self.assertIn("git pull --ff-only", self.text())
+                self.assertIn("chmod u+w", self.text())
                 env = deploy.ENVS[name]
                 shell = deploy.SshRunner(SERVER, Path(deploy.SOCKET_PARENT) / "rots-deploy-XXXXXX")
 

@@ -124,9 +124,11 @@ remote command string is built with `shlex.quote`.
 
 3. **Pre-check.** Confirm `src`, `bin`, and `lib/text` exist under `/rots/<dir>`. List paths `<user>`
    cannot write: `find . ../bin ! -writable -print`, plus `../lib/text` itself and each help file
-   that already exists there. If any, show them, run `sudo chown -R <user>` on `. ../bin` and
-   `sudo chown <user>` on the `lib/text` paths, over `ssh -t` (so a sudo password prompt, if any,
-   reaches the terminal), then re-run the check and stop if anything is still unwritable. Group
+   that already exists there. If any, show them and first run `chmod u+w` on the ones `<user>` owns
+   (no sudo, so no password prompt), then re-check. Only if something is still unwritable, run
+   `sudo chown -R <user>` on `. ../bin` and `sudo chown <user>` on the `lib/text` paths, over `ssh -t`
+   (so a sudo password prompt reaches the terminal), then `chmod u+w` again, re-run the check, and
+   stop if anything is still unwritable. Group
    membership alone is not enough when files lack group write, which is why this happens before
    anything changes — so an upload can never fail halfway on a permission error.
 4. **Backup** (skipped when the env has `backup: no`).

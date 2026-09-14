@@ -357,6 +357,18 @@ def chown_command(env: Env, user: str, help_names: Sequence[str]) -> str:
     )
 
 
+def chmod_owned_command(env: Env, help_names: Sequence[str]) -> str:
+    """Adds owner write permission to every path the ssh user owns but cannot write. Needs no sudo."""
+    base = port_dir(env)
+    return (
+        "me=$(id -un); "
+        f'find {q(base + "/src")} {q(base + "/bin")} -user "$me" ! -writable -exec chmod u+w {{}} + 2>/dev/null; '
+        f"for f in {q(base + '/' + HELP_DIR)} {_help_paths(env, help_names)}; do "
+        '[ ! -e "$f" ] || [ -w "$f" ] || [ -z "$(find "$f" -maxdepth 0 -user "$me")" ] || chmod u+w "$f"; '
+        "done; true"
+    )
+
+
 def backup_command(env: Env, help_names: Sequence[str]) -> str:
     """Refresh src/backup with everything in src plus the server's current help files.
 
@@ -564,7 +576,9 @@ def dry_run_plan(env: Env, server: Server, repo: Path, help_names: Sequence[str]
     step3 = [f"== 3. {STEP_TITLES[3]}", ssh(missing_dirs_command(env))]
     if env.backup:
         step3.append(ssh(unfinished_deploy_command(env)))
-    step3 += [ssh(unwritable_command(env, help_names)), "  only if something is unwritable:",
+    step3 += [ssh(unwritable_command(env, help_names)), "  only if something is unwritable (no sudo):",
+              ssh(chmod_owned_command(env, help_names)),
+              "  only if something is still unwritable (sudo), then chmod again and re-check:",
               ssh(chown_command(env, server.user, help_names), tty=True)]
     lines += step3
     lines += [f"== 4. {STEP_TITLES[4]}",
@@ -626,8 +640,14 @@ def deploy(env: Env, server: Server, checkout, runner, *, dry_run: bool, color: 
         unwritable = _lines(runner.remote(unwritable_command(env, help_names), capture=True))
         if unwritable:
             out(f"Not writable by {server.user}:\n  " + "\n  ".join(unwritable))
-            out("Fixing ownership with sudo chown; sudo may ask for a password.")
+            runner.remote(chmod_owned_command(env, help_names))
+            unwritable = _lines(runner.remote(unwritable_command(env, help_names), capture=True))
+            if not unwritable:
+                out("Fixed with chmod u+w; no sudo needed.")
+        if unwritable:
+            out("Still not writable; fixing ownership with sudo chown. sudo may ask for a password.")
             runner.remote(chown_command(env, server.user, help_names), tty=True)
+            runner.remote(chmod_owned_command(env, help_names))
             unwritable = _lines(runner.remote(unwritable_command(env, help_names), capture=True))
             if unwritable:
                 raise DeployError("still not writable after chown:\n  " + "\n  ".join(unwritable))
