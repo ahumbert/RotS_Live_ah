@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "account_management.h"
+#include "account_errors.h"
 #include "account_ppc.h"
 #include "color.h"
 #include "comm.h"
@@ -3679,6 +3680,15 @@ void nanny(struct descriptor_data* d, char* arg)
             std::string error_message;
 
             if (!account::link_and_migrate_character(kAccountStorageRoot, d->account_name, arg, GET_NAME(d->character), time(0), &account_data, &migration, &error_message)) {
+                // The success case below has always mudlogged. The failure case told the player and
+                // nobody else -- no log, no mudlog -- so a conversion that cannot complete was
+                // invisible unless the player thought to report it. That is the wrong way round:
+                // this is the one-way door onto the account system, and a character that will not
+                // convert is stuck outside it. It is not hypothetical either -- a legacy character
+                // whose description exceeds 511 bytes fails load_char outright, and there are
+                // hundreds of those on live.
+                account_errors::record(account_errors::Source::Migration, d->account_name,
+                    GET_NAME(d->character), error_message);
                 SEND_TO_Q((error_message + "\n\r").c_str(), d);
                 clear_account_login_state(d);
                 STATE(d) = CON_PLYNG;
@@ -3928,6 +3938,12 @@ void nanny(struct descriptor_data* d, char* arg)
             account::CharacterMigrationData migration;
             std::string error_message;
             if (!account::admin_link_and_migrate_character(kAccountStorageRoot, d->account_name, legacy_name, time(0), &account_data, &migration, &error_message)) {
+                // Same reasoning as the in-game link path above: this is the one-way door onto
+                // account storage, and a character that will not convert is stuck outside it.
+                // Telling only the player made that invisible -- and this is the path a returning
+                // player uses for a character that has been sitting in players/ for decades.
+                account_errors::record(account_errors::Source::Migration, d->account_name,
+                    legacy_name, error_message);
                 SEND_TO_Q((error_message + "\n\r").c_str(), d);
                 *d->account_character_name = '\0';
                 if (account::read_account_file(kAccountStorageRoot, d->account_name, &account_data, nullptr))

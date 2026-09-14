@@ -1458,13 +1458,25 @@ def run_smoke_attempt(args: argparse.Namespace, repo_root: Path) -> int:
             reader.recv_until(["Class:"], 8.0)
             send_line(sock, "a")
 
-            reader.recv_until(["Do you wish to enable the default colour set (Y/N)?"], 8.0)
-            send_line(sock, "n")
-
-            reader.recv_until(["Do you see an 'a' with a pair of dots above it:"], 8.0)
-            send_line(sock, "n")
-
-            wait_for_character_menu(reader, 8.0)
+            # The account stored its colour and latin-1 choices when its first character was created,
+            # so this second character must inherit them without being asked either question again.
+            # Stop at whichever arrives first: a server that still asks waits for the answer, so the
+            # character menu would never come and a plain menu wait would only report a timeout.
+            skipped_prompts = (
+                "Do you wish to enable the default colour set (Y/N)?",
+                "Do you see an 'a' with a pair of dots above it:",
+            )
+            creation_output = reader.recv_until(["Make your choice:", *skipped_prompts], 8.0)
+            for skipped_prompt in skipped_prompts:
+                if skipped_prompt in creation_output:
+                    raise RuntimeError(
+                        f"Second character creation asked {skipped_prompt!r} although the account already stores that preference."
+                    )
+            require_markers(
+                creation_output,
+                ["0) Back to Account Menu.", "5) Delete this character.", "Make your choice:"],
+                "Character menu",
+            )
             send_line(sock, "0")
             wait_for_account_menu(reader, 8.0)
 

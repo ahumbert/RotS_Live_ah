@@ -6,6 +6,7 @@
 #include "structs.h"
 
 #include <array>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -161,6 +162,36 @@ std::string serialize_character_to_json_v2a(const CharacterData& character);
 std::string serialize_character_to_json_v2b(const CharacterData& character);
 bool deserialize_character_from_json_v2a(const std::string& json, CharacterData* character, std::string* error_message = nullptr);
 bool deserialize_character_from_json_v2b(const std::string& json, CharacterData* character, std::string* error_message = nullptr);
+
+// Two or more entries in a name-keyed table that produce the SAME JSON key. The character file
+// writes skills and talks as objects keyed by name, so a table carrying a duplicate name (today
+// skills 125 and 126, both "trash") makes a character holding values in both serialize to a
+// duplicate key -- which the reader refuses, for the whole file. That is the one way this writer can
+// produce something its own reader will not take back, so it is checked directly rather than by
+// re-parsing every save.
+struct NamedKeyCollision {
+    std::string table; // "skill", "talk" or "color"
+    std::string key; // the JSON key the entries share
+    std::vector<int> indices; // the slots sharing it, ascending
+    // Whether a duplicate of this key makes the READER refuse the whole file. True for skills and
+    // talks, which parse through parse_named_integer_object and its duplicate check. False for
+    // colours: parse_colors_object resolves each key to a slot and assigns, so a duplicate silently
+    // overwrites instead -- a fidelity defect worth reporting at boot, but not a reason to refuse a
+    // player's save.
+    bool duplicate_refuses_the_file = true;
+};
+
+// The scan behind named_key_collisions(), exposed so its behaviour can be tested directly against
+// synthetic tables rather than only against whatever consts.cpp happens to contain today.
+std::vector<NamedKeyCollision> find_key_collisions(const char* table_name, int slot_count,
+    const std::function<std::string(int)>& key_for_index);
+
+// Computed once from the static tables. Empty on a healthy build; boot reports whatever is here.
+const std::vector<NamedKeyCollision>& named_key_collisions();
+
+// Empty when this character can be written and read back. Otherwise a sentence naming the clash,
+// for the refusal message.
+std::string first_unwritable_named_value(const CharacterData& character);
 
 std::vector<std::string> encode_player_flags(long flags);
 std::vector<std::string> encode_preference_flags(long flags);

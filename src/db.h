@@ -205,7 +205,13 @@ struct player_index_element {
     int warpoints;
     int rank;
     int totalrank;
-    char ch_file[80]; /* for speed in locating the file to load */
+    // 31 bytes of fixed structure ("./accounts/<bucket>/" + "/" + ".character.json") plus the
+    // email plus the character name. At 80 that left 36 bytes for an email address, and
+    // nothing caps email length -- so an ordinary address made the conversion write files whose
+    // path the index could not hold, and the NEXT boot exit(1)'d. This struct is built fresh at
+    // boot and never serialized, so the width is free to choose; 160 leaves 117 for email plus
+    // name, past any real address, at ~80 bytes more per character in memory.
+    char ch_file[160]; /* for speed in locating the file to load */
 };
 
 struct help_index_element {
@@ -233,6 +239,11 @@ struct exploit_record {
     int iKillerLevel; /* at time of kill */
     int iIntParam; /* reserved */
 };
+// Renames a live character, moving its files. Returns 1 on success and -1 when the rename was
+// REFUSED, in which case nothing was changed; `error_message`, when given, says why in words the
+// only caller (`wizset <victim> name <newname>`) can show an immortal.
+int rename_char(struct char_data* ch, char* newname, std::string* error_message = nullptr);
+
 bool load_exploit_records_for_character(const std::string& root_directory, const std::string& character_name, std::vector<exploit_record>* records, std::string* error_message = nullptr);
 bool write_exploit_record_for_character(const std::string& root_directory, const std::string& character_name, const exploit_record& record, std::string* error_message = nullptr);
 bool load_object_save_bytes_for_character(const std::string& root_directory, const std::string& character_name, std::string* bytes, std::string* error_message = nullptr);
@@ -266,6 +277,10 @@ struct ban_list_element {
     long date;
     struct ban_list_element* next;
 };
+
+// Builds the account index and the account-native half of the player table at boot. Declared here
+// rather than kept file-local so its boot-failure behaviour can be tested.
+void build_account_native_player_index(void);
 
 extern char buf[MAX_STRING_LENGTH];
 extern char buf1[MAX_STRING_LENGTH];

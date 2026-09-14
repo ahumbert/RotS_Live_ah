@@ -312,6 +312,57 @@ TEST(ObjectsJson, RejectsOverlongAliasKeywords)
     EXPECT_NE(error_message.find("Alias keyword"), std::string::npos);
 }
 
+TEST(ObjectsJson, KeepsALegacyAliasKeywordThatFillsTheEntireFieldReadable)
+{
+    objects_json::ObjectSaveData data = make_object_save_data();
+    data.aliases[0].keyword = "nineteen_characters";
+
+    std::string bytes;
+    std::string error_message;
+    ASSERT_TRUE(objects_json::object_save_data_to_binary(data, &bytes, &error_message)) << error_message;
+
+    // The legacy save writes the keyword as 20 raw bytes, so an in-game alias of
+    // exactly 20 characters leaves no room for a terminator.
+    const size_t keyword_offset = bytes.find("nineteen_characters");
+    ASSERT_NE(keyword_offset, std::string::npos);
+    ASSERT_EQ(bytes[keyword_offset + 19], '\0');
+    bytes[keyword_offset + 19] = 'x';
+
+    objects_json::ObjectSaveData parsed;
+    ASSERT_TRUE(objects_json::object_save_data_from_binary(bytes, &parsed, &error_message)) << error_message;
+    ASSERT_EQ(parsed.aliases.size(), data.aliases.size());
+    EXPECT_EQ(parsed.aliases[0].keyword, "nineteen_characters");
+
+    const std::string json = objects_json::serialize_objects_to_json(parsed);
+    objects_json::ObjectSaveData round_tripped;
+    ASSERT_TRUE(objects_json::deserialize_objects_from_json(json, &round_tripped, &error_message)) << error_message;
+    ASSERT_EQ(round_tripped.aliases.size(), data.aliases.size());
+    EXPECT_EQ(round_tripped.aliases[0].keyword, "nineteen_characters");
+}
+
+TEST(ObjectsJson, ReadsBackAnObjectsFileWrittenWithAnOverlongAliasKeyword)
+{
+    // The binary reader clamps to 19 now, so nothing NEW can produce this. A file written before
+    // that fix can: the JSON writer never length-checked, and migration deleted the legacy .obj
+    // behind it. Refusing the file here costs the character its rent, gold, inventory and worn
+    // equipment for good, when the only thing wrong is one keyword being a character too long.
+    objects_json::ObjectSaveData data = make_object_save_data();
+    data.aliases[0].keyword = "nineteen_characters";
+
+    std::string json = objects_json::serialize_objects_to_json(data);
+    const std::string written = "\"keyword\": \"nineteen_characters\"";
+    const size_t at = json.find(written);
+    ASSERT_NE(at, std::string::npos);
+    json.replace(at, written.size(), "\"keyword\": \"nineteen_characters_x\"");
+
+    objects_json::ObjectSaveData parsed;
+    std::string error_message;
+    ASSERT_TRUE(objects_json::deserialize_objects_from_json(json, &parsed, &error_message)) << error_message;
+    ASSERT_FALSE(parsed.aliases.empty());
+    EXPECT_EQ(parsed.aliases[0].keyword, "nineteen_characters")
+        << "kept to what the game can store, rather than losing the whole file";
+}
+
 TEST(ObjectsJson, RejectsOutOfRangeNarrowedFields)
 {
     objects_json::ObjectSaveData data = make_object_save_data();

@@ -1284,8 +1284,10 @@ struct mount_data_type {
     int next_rider_number;
 };
 
+#define MAX_ALIAS_KEYWORD_LENGTH 19
+
 struct alias_list {
-    char keyword[20];
+    char keyword[MAX_ALIAS_KEYWORD_LENGTH + 1];
     char* command;
     struct alias_list* next;
 };

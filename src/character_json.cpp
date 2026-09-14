@@ -8,7 +8,9 @@
 #include <cctype>
 #include <charconv>
 #include <cstddef>
+#include <functional>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <unordered_map>
 
@@ -2883,9 +2885,9 @@ bool deserialize_character_from_json(const std::string& json, CharacterData* cha
             if (key == "state")
                 return saw_state = true, parse_state_object(nested_reader, &parsed_character, nested_error_message);
             if (key == "talks")
-                return saw_talks = true, parse_named_integer_object(nested_reader, &parsed_character.talks, MAX_TOUNGE, "talk", talk_index_for_key, nested_error_message);
+                return saw_talks = true, parse_named_integer_object(nested_reader, &parsed_character.talks, MAX_TOUNGE, "talk", talk_index_for_key_memoized, nested_error_message);
             if (key == "skills")
-                return saw_skills = true, parse_named_integer_object(nested_reader, &parsed_character.skills, MAX_SKILLS, "skill", skill_index_for_key, nested_error_message);
+                return saw_skills = true, parse_named_integer_object(nested_reader, &parsed_character.skills, MAX_SKILLS, "skill", skill_index_for_key_memoized, nested_error_message);
             if (key == "affects")
                 return saw_affects = true, parse_affects_array(nested_reader, &parsed_character.affects, nested_error_message);
             return nested_reader->skip_value(nested_error_message);
@@ -3072,6 +3074,91 @@ bool deserialize_character_from_json_v2a(const std::string& json, CharacterData*
 bool deserialize_character_from_json_v2b(const std::string& json, CharacterData* character, std::string* error_message)
 {
     return deserialize_character_v2_dispatch<json_utils::JsonReaderV2>(json, character, error_message);
+}
+
+// Walks one name-keyed table and reports every key more than one slot produces.
+std::vector<NamedKeyCollision> find_key_collisions(const char* table_name, int slot_count,
+    const std::function<std::string(int)>& key_for_index)
+{
+    std::map<std::string, std::vector<int>> slots_by_key;
+    for (int index = 0; index < slot_count; ++index)
+        slots_by_key[key_for_index(index)].push_back(index);
+
+    std::vector<NamedKeyCollision> found;
+    for (const auto& entry : slots_by_key) {
+        if (entry.second.size() < 2)
+            continue;
+        NamedKeyCollision collision;
+        collision.table = table_name;
+        collision.key = entry.first;
+        collision.indices = entry.second;
+        found.push_back(collision);
+    }
+    return found;
+}
+
+const std::vector<NamedKeyCollision>& named_key_collisions()
+{
+    // Built once per process: the tables are static data, so the answer cannot change while the game
+    // runs. Colours are scanned too -- kColorFieldNames is hand-maintained and was extended as
+    // recently as the 'mob' slot -- but a duplicate there does NOT refuse the file, so it is reported
+    // and never used to refuse a save.
+    static const std::vector<NamedKeyCollision> collisions = [] {
+        std::vector<NamedKeyCollision> found = find_key_collisions("skill", MAX_SKILLS, skill_key_for_index);
+
+        const std::vector<NamedKeyCollision> talks = find_key_collisions("talk", MAX_TOUNGE, talk_key_for_index);
+        found.insert(found.end(), talks.begin(), talks.end());
+
+        std::vector<NamedKeyCollision> colors = find_key_collisions("color", MAX_COLOR_FIELDS, color_key_for_index);
+        for (NamedKeyCollision& collision : colors)
+            collision.duplicate_refuses_the_file = false;
+        found.insert(found.end(), colors.begin(), colors.end());
+
+        return found;
+    }();
+    return collisions;
+}
+
+std::string first_unwritable_named_value(const CharacterData& character)
+{
+    // Cheap by construction: one pass over the collisions the tables actually have (one, today),
+    // counting how many of each group's slots this character holds a value in. Two is what emits the
+    // key twice.
+    for (const NamedKeyCollision& collision : named_key_collisions()) {
+        // Named explicitly rather than by a two-way ternary: a table added later must not silently
+        // read some other table's values. Anything whose duplicates the reader tolerates is reported
+        // at boot and skipped here -- refusing a save over it would cost a player their progress for
+        // a defect that only merges two of their colour slots.
+        if (!collision.duplicate_refuses_the_file)
+            continue;
+
+        const std::vector<int>* values = nullptr;
+        if (collision.table == "skill")
+            values = &character.skills;
+        else if (collision.table == "talk")
+            values = &character.talks;
+        if (values == nullptr)
+            continue;
+
+        int slots_with_a_value = 0;
+        for (int index : collision.indices) {
+            if (index >= 0 && index < static_cast<int>(values->size()) && (*values)[index] != 0)
+                ++slots_with_a_value;
+        }
+
+        if (slots_with_a_value > 1) {
+            std::string slots;
+            for (int index : collision.indices) {
+                if (!slots.empty())
+                    slots += ", ";
+                slots += std::to_string(index);
+            }
+            return "two or more " + collision.table + " slots share the key '" + collision.key
+                + "' (" + slots + ") and this character holds a value in more than one of them";
+        }
+    }
+
+    return std::string();
 }
 
 std::vector<std::string> encode_player_flags(long flags)

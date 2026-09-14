@@ -1,3 +1,4 @@
+#include "../account_errors.h"
 #include "../account_management.h"
 #include "../account_ppc.h"
 #include "../db.h"
@@ -9,6 +10,8 @@
 #include "../spells.h"
 #include "../structs.h"
 #include "../utils.h"
+
+#include "AccountRecordOnDiskBuilder.h"
 
 #include <gtest/gtest.h>
 
@@ -2752,6 +2755,93 @@ TEST(InterpreAccountMenu, AccountMenuLinkChoiceUsesPlayerFacingSuccessMessage)
     EXPECT_EQ(std::count(reloaded_account.characters.begin(), reloaded_account.characters.end(), "aragorn"), 1);
 }
 
+TEST(InterpreAccountMenu, AccountMenuLinkFailureIsLoggedAndLeavesTheLegacyFilesInPlace)
+{
+    // The one-way door onto the account system. A conversion that cannot complete told the player
+    // and nobody else -- no syslog line, no mudlog -- so a character stuck outside account storage
+    // was invisible unless the player thought to report it. The in-game link path already logs its
+    // failures; this is the path a returning player uses to add a character from 1998.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+    ScopedPlayerTableReset player_table_reset;
+    ASSERT_EQ(mkdir("accounts", 0700), 0);
+    ASSERT_EQ(mkdir("accounts/A-E", 0700), 0);
+    ASSERT_EQ(mkdir("players", 0700), 0);
+    ASSERT_EQ(mkdir("players/A-E", 0700), 0);
+    ASSERT_EQ(mkdir("players/F-J", 0700), 0);
+    ASSERT_EQ(mkdir("players/K-O", 0700), 0);
+    ASSERT_EQ(mkdir("players/P-T", 0700), 0);
+    ASSERT_EQ(mkdir("players/U-Z", 0700), 0);
+    ASSERT_EQ(mkdir("players/ZZZ", 0700), 0);
+    ASSERT_EQ(mkdir("plrobjs", 0700), 0);
+    ASSERT_EQ(mkdir("plrobjs/A-E", 0700), 0);
+    ASSERT_EQ(mkdir("exploits", 0700), 0);
+    ASSERT_EQ(mkdir("exploits/A-E", 0700), 0);
+
+    account::AccountData stored_account;
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(".", "acct", "player@example.com", "ValidPass1", 1700010200, &stored_account, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_verify_email(".", "acct", "test", 1700010201, &stored_account, &error_message)) << error_message;
+
+    char_file_u legacy_character = make_stored_character("aragorn", 50, RACE_WOOD);
+    legacy_character.specials2.idnum = 4242;
+    legacy_character.last_logon = 1700010202;
+    const std::string legacy_player_path = write_valid_legacy_player_file(temp_directory.path(), legacy_character);
+    const int legacy_player_index = create_entry(const_cast<char*>("aragorn"));
+    ASSERT_GE(legacy_player_index, 0);
+    std::snprintf(player_table[legacy_player_index].ch_file, sizeof(player_table[legacy_player_index].ch_file), "%s", legacy_player_path.c_str());
+    player_table[legacy_player_index].level = legacy_character.level;
+    player_table[legacy_player_index].race = legacy_character.race;
+    player_table[legacy_player_index].idnum = legacy_character.specials2.idnum;
+    player_table[legacy_player_index].log_time = legacy_character.last_logon;
+    player_table[legacy_player_index].flags = legacy_character.specials2.act;
+
+    descriptor_data descriptor = make_descriptor();
+
+    char menu_choice[] = "3";
+    nanny(&descriptor, menu_choice);
+    ASSERT_EQ(descriptor.connected, CON_ACCTLINKNAME);
+
+    char name_choice[] = "aragorn";
+    nanny(&descriptor, name_choice);
+    ASSERT_EQ(descriptor.connected, CON_ACCTLEGPWD);
+
+    descriptor.output[0] = '\0';
+    descriptor.bufptr = 0;
+    descriptor.bufspace = SMALL_BUFSIZE - 1;
+
+    // The account's own directory loses its write bit, so the conversion cannot put anything there.
+    const std::string account_directory = "accounts/P-T/player@example.com";
+    ASSERT_EQ(chmod(account_directory.c_str(), 0500), 0);
+
+    account_errors::clear();
+    testing::internal::CaptureStderr();
+    char password_choice[] = "LegacyPw1";
+    nanny(&descriptor, password_choice);
+    const std::string logged = testing::internal::GetCapturedStderr();
+    ASSERT_EQ(chmod(account_directory.c_str(), 0700), 0);
+
+    EXPECT_EQ(descriptor.connected, CON_ACCTMENU);
+    EXPECT_NE(logged.find("ACCTERR migration acct=acct char=aragorn:"), std::string::npos)
+        << "a failed conversion must name the account and the character; logged: " << logged;
+
+    // And be answerable afterwards, which is the whole point: the player reports this hours later.
+    const std::vector<account_errors::Entry> recorded = account_errors::recent(10);
+    ASSERT_EQ(recorded.size(), 1u);
+    EXPECT_EQ(recorded[0].source, account_errors::Source::Migration);
+    EXPECT_EQ(recorded[0].character, "aragorn");
+    EXPECT_EQ(recorded[0].account, "acct");
+    account_errors::clear();
+
+    struct stat legacy_info { };
+    EXPECT_EQ(stat(legacy_player_path.c_str(), &legacy_info), 0)
+        << "the legacy player file must survive a failed conversion";
+
+    account::AccountData reloaded_account;
+    ASSERT_TRUE(account::read_account_file(".", "acct", &reloaded_account, &error_message)) << error_message;
+    EXPECT_FALSE(account::account_has_character(reloaded_account, "aragorn"));
+}
+
 TEST(InterpreAccountMenu, InGameLinkChoiceUsesPlayerFacingSuccessMessage)
 {
     TemporaryDirectory temp_directory;
@@ -4684,9 +4774,13 @@ TEST(InterpreAccountMenu, IntroduceCharRejectsTooLongAccountNativeIndexPathWitho
     ScopedMotdOverride motd_override(test_motd);
 
     const char* account_name = "abcdefghijklmnopqrst";
-    const char* long_email = "abcdefghijklmnopqrst123456789012345678901234567890@example.com";
+    // Derived from the buffer rather than hardcoded: ch_file has been widened once, and a fixture
+    // that quietly stops exceeding it turns this into a test of nothing.
+    const std::string long_email = std::string(sizeof(player_table[0].ch_file), 'a') + "@example.com";
+    // Planted, not registered: MAX_EMAIL_LENGTH refuses this address at create_account now, and a
+    // record put on disk by hand is the route that can still produce an over-length path.
     std::string error_message;
-    ASSERT_TRUE(account::create_account(".", account_name, long_email, "ValidPass1", 1700010200, nullptr, &error_message)) << error_message;
+    rots_tests::plant_account_record_with_unvalidated_email(".", account_name, long_email, {}, 1700010200);
     const std::string account_character_path = account::account_character_player_path(".", account_name, "aragorn");
     ASSERT_GE(account_character_path.size(), sizeof(player_table[0].ch_file))
         << "Test setup must exceed the legacy player index path buffer.";
@@ -4743,17 +4837,20 @@ TEST(InterpreAccountMenu, AccountSelectionRejectsTooLongAccountNativeIndexPathWi
     ASSERT_EQ(mkdir("accounts/A-E", 0700), 0);
 
     const char* account_name = "abcdefghijklmnopqrst";
-    const char* long_email = "abcdefghijklmnopqrst123456789012345678901234567890@example.com";
+    // Derived from the buffer rather than hardcoded: ch_file has been widened once, and a fixture
+    // that quietly stops exceeding it turns this into a test of nothing.
+    const std::string long_email = std::string(sizeof(player_table[0].ch_file), 'a') + "@example.com";
+    // Planted, not registered: MAX_EMAIL_LENGTH refuses this address at create_account now. The
+    // record lists the character from the start, so the link admin_link_character used to add is
+    // already there and the object and exploit writers below still resolve through it.
     std::string error_message;
-    account::AccountData account_data;
-    ASSERT_TRUE(account::create_account(".", account_name, long_email, "ValidPass1", 1700010200, &account_data, &error_message)) << error_message;
+    rots_tests::plant_account_record_with_unvalidated_email(".", account_name, long_email, { "aragorn" }, 1700010200);
 
     char_file_u stored_character = make_stored_character("aragorn", 1, RACE_HUMAN);
     stored_character.specials2.idnum = 4242;
     ASSERT_TRUE(account::write_account_character_file(".", account_name, stored_character, &error_message)) << error_message;
     ASSERT_TRUE(account::write_default_account_object_file(".", account_name, "aragorn", &error_message)) << error_message;
     ASSERT_TRUE(account::write_default_account_exploit_file(".", account_name, "aragorn", &error_message)) << error_message;
-    ASSERT_TRUE(account::admin_link_character(".", account_name, "aragorn", 1700010201, &account_data, &error_message)) << error_message;
     const std::string account_character_path = account::account_character_player_path(".", account_name, "aragorn");
     ASSERT_GE(account_character_path.size(), sizeof(player_table[0].ch_file))
         << "Test setup must exceed the legacy player index path buffer.";
@@ -4761,7 +4858,7 @@ TEST(InterpreAccountMenu, AccountSelectionRejectsTooLongAccountNativeIndexPathWi
     descriptor_data descriptor = make_descriptor();
     descriptor.connected = CON_ACCTSLCT;
     std::snprintf(descriptor.account_name, sizeof(descriptor.account_name), "%s", account_name);
-    std::snprintf(descriptor.account_email, sizeof(descriptor.account_email), "%s", long_email);
+    std::snprintf(descriptor.account_email, sizeof(descriptor.account_email), "%s", long_email.c_str());
 
     char selection[] = "1";
     nanny(&descriptor, selection);
