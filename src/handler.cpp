@@ -1673,10 +1673,12 @@ void obj_to_room(struct obj_data* object, int room)
          tmpobj = tmpobj->next_content, tmp++)
         ;
     if (tmp >= 1000) {
+        // Report only. A floor this large is legitimate -- a mass quit drops every quitter's gear in
+        // one room. This used to "recover" by resetting the room's contents to this object, which
+        // left every other object claiming the room but off its list, and obj_from_room crashed when
+        // one decayed. A real cycle would already have hung the duplicate scan above.
         mudlog("obj_to_room: infinite loop in room contents.",
             NRM, LEVEL_GOD, TRUE);
-        world[room].contents = object;
-        object->next_content = 0;
     }
     object->in_room = room;
     object->carried_by = 0;
