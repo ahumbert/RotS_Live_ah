@@ -185,3 +185,111 @@ def check_help_tables(repo: Path, tracked: Iterable[str]) -> List[str]:
             continue
         problems.extend(check_help_format(chapter, (repo / path).read_text(errors="replace")))
     return problems
+
+
+# ---------------------------------------------------------------------------------------------
+# The local checkout
+# ---------------------------------------------------------------------------------------------
+
+TAG_DATE_PATTERN = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-(\d+))?$")
+
+
+def git(repo: Path, *args: str) -> str:
+    result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise DeployError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+def current_branch(repo: Path) -> str:
+    return git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+
+
+def check_checkout(repo: Path, env: Env) -> List[str]:
+    """Stop on anything that would deploy the wrong files; return warnings worth showing."""
+    if git(repo, "status", "--porcelain", "--untracked-files=no").strip():
+        raise DeployError("the checkout has uncommitted changes; commit or stash them first")
+    extras = []
+    status = git(repo, "status", "--porcelain", "--ignored", "--untracked-files=all", "--", "src")
+    for line in status.splitlines():
+        path = line[3:].strip('"')
+        # `put -r *` skips names starting with '.', such as src/.remember/.
+        if not path.split("/")[1].startswith("."):
+            extras.append(path)
+    if extras:
+        raise DeployError("src/ has untracked or ignored files that `put -r *` would upload: " + ", ".join(extras))
+    branch = current_branch(repo)
+    if branch == DEPLOY_BRANCH:
+        return []
+    message = f"the checkout is on {branch!r}, not {DEPLOY_BRANCH!r}"
+    if env.require_branch:
+        raise DeployError(message)
+    return [message + "; deploying it without pulling because this is a test target"]
+
+
+def next_tag_name(prefix: str, day: datetime.date, existing: Iterable[str]) -> str:
+    existing = set(existing)
+    base = f"{prefix}{day.isoformat()}"
+    name, count = base, 1
+    while name in existing:
+        count += 1
+        name = f"{base}-{count}"
+    return name
+
+
+def previous_tag(prefix: str, existing: Iterable[str]) -> Optional[str]:
+    """The latest <prefix>YYYY-MM-DD[-N] tag, or None."""
+    dated = []
+    for tag in existing:
+        match = TAG_DATE_PATTERN.match(tag[len(prefix):]) if tag.startswith(prefix) else None
+        if match:
+            dated.append((match.group(1), int(match.group(2) or 1), tag))
+    return max(dated)[2] if dated else None
+
+
+def help_changes_line(previous: Optional[str], changed: Sequence[str]) -> str:
+    if previous is None:
+        return "Help changes: first tagged deploy"
+    return f"Help changes since {previous}: {', '.join(changed) if changed else 'none'}"
+
+
+def tag_message(env: Env, sha: str, help_line: str) -> str:
+    return f"Deployed {sha} to {env.name} ({port_dir(env)}).\n\n{help_line}\n"
+
+
+class Checkout:
+    """The local git checkout being deployed."""
+
+    def __init__(self, repo: Path):
+        self.repo = repo
+
+    def prepare(self, env: Env, dry_run: bool) -> List[str]:
+        warnings = check_checkout(self.repo, env)
+        if not dry_run and current_branch(self.repo) == DEPLOY_BRANCH:
+            git(self.repo, "pull", "--ff-only")
+        return warnings
+
+    def head(self) -> Tuple[str, str]:
+        sha, _, subject = git(self.repo, "log", "-1", "--format=%H%x00%s").strip().partition("\0")
+        return sha, subject
+
+    def _tracked_help_dir(self) -> List[str]:
+        return git(self.repo, "ls-files", "--", HELP_DIR).splitlines()
+
+    def help_files(self) -> List[str]:
+        return help_files(self._tracked_help_dir())
+
+    def help_problems(self) -> List[str]:
+        return check_help_tables(self.repo, self._tracked_help_dir())
+
+    def create_tag(self, env: Env, sha: str, help_names: Sequence[str], day: datetime.date) -> str:
+        existing = git(self.repo, "tag", "--list").split()
+        previous = previous_tag(env.tag_prefix, existing)
+        changed: List[str] = []
+        if previous is not None:
+            paths = [f"{HELP_DIR}/{name}" for name in help_names]
+            diff = git(self.repo, "diff", "--name-only", previous, sha, "--", *paths)
+            changed = [path.rpartition("/")[2] for path in diff.split()]
+        name = next_tag_name(env.tag_prefix, day, existing)
+        git(self.repo, "tag", "-a", name, sha, "-m", tag_message(env, sha, help_changes_line(previous, changed)))
+        return name

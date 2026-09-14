@@ -191,5 +191,176 @@ class CheckHelpTablesTest(unittest.TestCase):
         self.assertEqual(deploy.check_help_tables(self.repo, ["lib/text/help_tbl", "lib/text/spec_tbl"]), [])
 
 
+# ---------------------------------------------------------------------------------------------
+# The local checkout
+# ---------------------------------------------------------------------------------------------
+
+
+class GitRepoTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.repo = Path(temp.name)
+        environment = mock.patch.dict(os.environ, {
+            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.org",
+            "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.org",
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.run_git("init", "-q", "-b", "release-frodo")
+        self.write("src/game.cpp", "int main() {}\n")
+        self.write("src/.gitignore", "*.o\n.remember/\n")
+        self.write("lib/text/help_tbl", "A\n#~\n")
+        self.write("lib/text/motd", "Welcome.\n")
+        self.commit("initial")
+        self.checkout = deploy.Checkout(self.repo)
+
+    def run_git(self, *args: str) -> str:
+        return subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True, text=True).stdout
+
+    def write(self, relative: str, text: str) -> None:
+        path = self.repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    def commit(self, message: str) -> str:
+        self.run_git("add", "-A")
+        self.run_git("commit", "-q", "-m", message)
+        return self.run_git("rev-parse", "HEAD").strip()
+
+
+class CheckCheckoutTest(GitRepoTestCase):
+    def test_clean_checkout_on_the_deploy_branch_passes(self) -> None:
+        self.assertEqual(deploy.check_checkout(self.repo, deploy.ENVS["live"]), [])
+
+    def test_uncommitted_change_stops(self) -> None:
+        self.write("src/game.cpp", "int main() { return 1; }\n")
+
+        with self.assertRaisesRegex(deploy.DeployError, "uncommitted"):
+            deploy.check_checkout(self.repo, deploy.ENVS["live"])
+
+    def test_ignored_object_file_in_src_stops(self) -> None:
+        self.write("src/game.o", "binary")
+
+        with self.assertRaisesRegex(deploy.DeployError, "src/game.o"):
+            deploy.check_checkout(self.repo, deploy.ENVS["live"])
+
+    def test_untracked_source_file_in_src_stops(self) -> None:
+        self.write("src/new_feature.cpp", "// not committed\n")
+
+        with self.assertRaisesRegex(deploy.DeployError, "src/new_feature.cpp"):
+            deploy.check_checkout(self.repo, deploy.ENVS["live"])
+
+    def test_dot_directories_in_src_and_files_outside_src_pass(self) -> None:
+        self.write("src/.remember/now.md", "notes\n")
+        self.write("notes.txt", "scratch\n")
+
+        self.assertEqual(deploy.check_checkout(self.repo, deploy.ENVS["live"]), [])
+
+    def test_other_branch_stops_a_real_port(self) -> None:
+        self.run_git("checkout", "-q", "-b", "feat/x")
+
+        with self.assertRaisesRegex(deploy.DeployError, "feat/x"):
+            deploy.check_checkout(self.repo, deploy.ENVS["live"])
+
+    def test_other_branch_only_warns_for_a_test_target(self) -> None:
+        self.run_git("checkout", "-q", "-b", "feat/x")
+
+        warnings = deploy.check_checkout(self.repo, TEST_ENV)
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("feat/x", warnings[0])
+
+
+class CheckoutTest(GitRepoTestCase):
+    def test_head_returns_sha_and_subject(self) -> None:
+        sha = self.run_git("rev-parse", "HEAD").strip()
+
+        self.assertEqual(self.checkout.head(), (sha, "initial"))
+
+    def test_help_files_come_from_git(self) -> None:
+        self.write("lib/text/untracked_tbl", "A\n#~\n")
+
+        self.assertEqual(self.checkout.help_files(), ["help_tbl"])
+
+    def test_dry_run_does_not_pull(self) -> None:
+        # There is no remote, so a pull would fail.
+        self.assertEqual(self.checkout.prepare(deploy.ENVS["live"], dry_run=True), [])
+
+    def test_real_run_pulls_on_the_deploy_branch(self) -> None:
+        with self.assertRaisesRegex(deploy.DeployError, "git pull --ff-only failed"):
+            self.checkout.prepare(deploy.ENVS["live"], dry_run=False)
+
+    def test_test_target_on_another_branch_does_not_pull(self) -> None:
+        self.run_git("checkout", "-q", "-b", "feat/x")
+
+        self.assertEqual(len(self.checkout.prepare(TEST_ENV, dry_run=False)), 1)
+
+
+class TagNamingTest(unittest.TestCase):
+    DAY = datetime.date(2026, 9, 13)
+
+    def test_first_tag_of_the_day(self) -> None:
+        self.assertEqual(deploy.next_tag_name("test-", self.DAY, ["test-2026-09-12"]), "test-2026-09-13")
+
+    def test_second_and_third_tags_of_the_day(self) -> None:
+        self.assertEqual(deploy.next_tag_name("test-", self.DAY, ["test-2026-09-13"]), "test-2026-09-13-2")
+        self.assertEqual(deploy.next_tag_name("test-", self.DAY, ["test-2026-09-13", "test-2026-09-13-2"]),
+                         "test-2026-09-13-3")
+
+    def test_previous_tag_is_the_latest_date_and_suffix_for_the_prefix(self) -> None:
+        tags = ["live-2026-09-11", "live-2026-09-13", "live-2026-09-13-2", "live-2026-09-13-10",
+                "test-2026-09-20", "live-hotfix", "4k-2026-10-01"]
+
+        self.assertEqual(deploy.previous_tag("live-", tags), "live-2026-09-13-10")
+        self.assertIsNone(deploy.previous_tag("coders-", tags))
+
+    def test_help_changes_line(self) -> None:
+        self.assertEqual(deploy.help_changes_line(None, []), "Help changes: first tagged deploy")
+        self.assertEqual(deploy.help_changes_line("test-2026-09-13", []), "Help changes since test-2026-09-13: none")
+        self.assertEqual(deploy.help_changes_line("test-2026-09-13", ["help_tbl", "shap_tbl"]),
+                         "Help changes since test-2026-09-13: help_tbl, shap_tbl")
+
+
+class CreateTagTest(GitRepoTestCase):
+    def tag_contents(self, name: str) -> str:
+        return self.run_git("tag", "-l", "--format=%(contents)", name)
+
+    def test_first_tag_records_env_dir_sha_and_first_deploy(self) -> None:
+        sha = self.run_git("rev-parse", "HEAD").strip()
+
+        name = self.checkout.create_tag(deploy.ENVS["test"], sha, ["help_tbl"], datetime.date(2026, 9, 13))
+
+        self.assertEqual(name, "test-2026-09-13")
+        contents = self.tag_contents(name)
+        self.assertIn(f"Deployed {sha} to test (/rots/dev-building4802).", contents)
+        self.assertIn("Help changes: first tagged deploy", contents)
+        self.assertNotIn("someone", contents)
+
+    def test_later_tag_lists_only_help_files_changed_since_the_previous_tag(self) -> None:
+        env = deploy.ENVS["test"]
+        first = self.run_git("rev-parse", "HEAD").strip()
+        self.checkout.create_tag(env, first, ["help_tbl"], datetime.date(2026, 9, 13))
+        self.write("lib/text/help_tbl", "A\nnew text\n#~\n")
+        self.write("lib/text/motd", "Changed on purpose.\n")
+        second = self.commit("help update")
+
+        name = self.checkout.create_tag(env, second, ["help_tbl"], datetime.date(2026, 9, 14))
+
+        self.assertEqual(name, "test-2026-09-14")
+        self.assertIn("Help changes since test-2026-09-13: help_tbl", self.tag_contents(name))
+
+    def test_same_day_redeploy_gets_a_suffix_and_no_help_changes(self) -> None:
+        env = deploy.ENVS["test"]
+        sha = self.run_git("rev-parse", "HEAD").strip()
+        self.checkout.create_tag(env, sha, ["help_tbl"], datetime.date(2026, 9, 13))
+
+        name = self.checkout.create_tag(env, sha, ["help_tbl"], datetime.date(2026, 9, 13))
+
+        self.assertEqual(name, "test-2026-09-13-2")
+        self.assertIn("Help changes since test-2026-09-13: none", self.tag_contents(name))
+
+
 if __name__ == "__main__":
     unittest.main()
