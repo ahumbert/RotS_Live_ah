@@ -125,3 +125,63 @@ def build_parser() -> argparse.ArgumentParser:
     deploy_parser.add_argument("--dry-run", action="store_true",
         help="run the local checks and print every step; change nothing")
     return parser
+
+
+# ---------------------------------------------------------------------------------------------
+# Help files
+# ---------------------------------------------------------------------------------------------
+
+HELP_CHAPTER_PATTERN = re.compile(r'"text/([^"/]+)"')
+
+
+def help_files(tracked: Iterable[str]) -> List[str]:
+    """The lib/text files every deploy uploads: the help tables (*_tbl) and the plain HELP page."""
+    names = []
+    for path in tracked:
+        directory, _, name = path.rpartition("/")
+        if directory == HELP_DIR and (name == "help" or name.endswith("_tbl")):
+            names.append(name)
+    return sorted(names)
+
+
+def help_chapters(consts_text: str) -> List[str]:
+    """The help files the game indexes: the "text/<name>" entries of help_content[] in consts.cpp."""
+    start = consts_text.find("help_content[]")
+    if start < 0:
+        raise DeployError("could not find help_content[] in src/consts.cpp")
+    end = consts_text.find("};", start)
+    return HELP_CHAPTER_PATTERN.findall(consts_text[start:end])
+
+
+def check_help_format(name: str, text: str) -> List[str]:
+    """Problems that would break build_help_index (modify.cpp) or do_help (act_info.cpp).
+
+    Both treat any line starting with '#' as the end of an entry, and '#~' as the end of the file.
+    """
+    lines = text.split("\n")
+    while lines and not lines[-1].strip():
+        lines.pop()
+    problems = []
+    for number, line in enumerate(lines, start=1):
+        marker = line.rstrip()
+        if not line.startswith("#") or marker == "#" or (marker == "#~" and number == len(lines)):
+            continue
+        if marker == "#~":
+            problems.append(f"{HELP_DIR}/{name}:{number}: '#~' before the end of the file hides every entry after it")
+        else:
+            problems.append(f"{HELP_DIR}/{name}:{number}: starts with '#', which ends the entry here: {line!r}")
+    if not lines or lines[-1].rstrip() != "#~":
+        problems.append(f"{HELP_DIR}/{name}: does not end with a '#~' line")
+    return problems
+
+
+def check_help_tables(repo: Path, tracked: Iterable[str]) -> List[str]:
+    tracked = set(tracked)
+    problems = []
+    for chapter in help_chapters((repo / "src" / "consts.cpp").read_text(errors="replace")):
+        path = f"{HELP_DIR}/{chapter}"
+        if path not in tracked:
+            problems.append(f"{path}: listed in src/consts.cpp help_content[] but not tracked in git")
+            continue
+        problems.extend(check_help_format(chapter, (repo / path).read_text(errors="replace")))
+    return problems
