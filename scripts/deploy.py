@@ -293,3 +293,115 @@ class Checkout:
         name = next_tag_name(env.tag_prefix, day, existing)
         git(self.repo, "tag", "-a", name, sha, "-m", tag_message(env, sha, help_changes_line(previous, changed)))
         return name
+
+
+# ---------------------------------------------------------------------------------------------
+# Remote commands (POSIX sh, run through ssh)
+# ---------------------------------------------------------------------------------------------
+
+
+def q(text: str) -> str:
+    return shlex.quote(text)
+
+
+def _help_paths(env: Env, help_names: Sequence[str]) -> str:
+    return " ".join(q(f"{port_dir(env)}/{HELP_DIR}/{name}") for name in help_names)
+
+
+def missing_dirs_command(env: Env) -> str:
+    base = port_dir(env)
+    dirs = " ".join(q(f"{base}/{sub}") for sub in ("src", "bin", HELP_DIR))
+    return f'for d in {dirs}; do [ -d "$d" ] || {{ echo "missing directory: $d"; exit 1; }}; done'
+
+
+def unwritable_command(env: Env, help_names: Sequence[str]) -> str:
+    """Prints one line per path the ssh user cannot write, and nothing when everything is writable."""
+    base = port_dir(env)
+    text_dir = f"{base}/{HELP_DIR}"
+    return (
+        f"find {q(base + '/src')} {q(base + '/bin')} ! -writable -print 2>&1; "
+        f"[ -w {q(text_dir)} ] || echo {q(text_dir)}; "
+        f'for f in {_help_paths(env, help_names)}; do [ ! -e "$f" ] || [ -w "$f" ] || echo "$f"; done; true'
+    )
+
+
+def chown_command(env: Env, user: str, help_names: Sequence[str]) -> str:
+    base = port_dir(env)
+    return (
+        f"sudo chown -R {q(user)} {q(base + '/src')} {q(base + '/bin')} && "
+        f"sudo chown {q(user)} {q(base + '/' + HELP_DIR)} && "
+        f'for f in {_help_paths(env, help_names)}; do [ ! -e "$f" ] || sudo chown {q(user)} "$f" || exit 1; done'
+    )
+
+
+def backup_command(env: Env, help_names: Sequence[str]) -> str:
+    """Refresh src/backup with everything in src plus the server's current help files.
+
+    Runs before make clean so the .o files come along and a revert only relinks. The old backup is
+    replaced only once the new copy is complete.
+    """
+    base = port_dir(env)
+    text_dir = q(f"{base}/{HELP_DIR}")
+    names = " ".join(q(name) for name in help_names)
+    return (
+        f"cd {q(base + '/src')} && rm -rf backup.new && mkdir backup.new && "
+        "find . -mindepth 1 -maxdepth 1 ! -name backup ! -name backup.new -exec cp -rp -t backup.new {} + && "
+        "mkdir backup.new/lib-text && "
+        f'for f in {names}; do [ ! -e {text_dir}/"$f" ] || cp -p {text_dir}/"$f" backup.new/lib-text/ || exit 1; done && '
+        "rm -rf backup && mv backup.new backup"
+    )
+
+
+def sftp_quote(text: str) -> str:
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def sftp_batch(env: Env, repo: Path, help_names: Sequence[str]) -> str:
+    base = port_dir(env)
+    lines = [
+        f"lcd {sftp_quote(str(repo / 'src'))}",
+        f"cd {sftp_quote(base + '/src')}",
+        "put -r *",
+        f"lcd {sftp_quote(str(repo / HELP_DIR))}",
+        f"cd {sftp_quote(base + '/' + HELP_DIR)}",
+    ]
+    lines += [f"put {sftp_quote(name)}" for name in help_names]
+    return "\n".join(lines) + "\n"
+
+
+def _sed_pattern(text: str) -> str:
+    return re.sub(r"([\\/.*\[\]^$])", r"\\\1", text)
+
+
+def _sed_replacement(text: str) -> str:
+    return re.sub(r"([\\/&])", r"\\\1", text)
+
+
+def source_edit_command(env: Env, edit: SourceEdit) -> str:
+    path = q(f"{port_dir(env)}/src/{edit.path}")
+    old, new = q(edit.old_line), q(edit.new_line)
+    script = q(f"s/^{_sed_pattern(edit.old_line)}$/{_sed_replacement(edit.new_line)}/")
+    expected_old = q(f"{edit.path}: expected exactly one line: {edit.old_line}")
+    expected_new = q(f"{edit.path}: the edit did not leave exactly one line: {edit.new_line}")
+    return (
+        f'[ "$(grep -cxF -- {old} {path})" = 1 ] || {{ echo {expected_old}; exit 1; }}; '
+        f"sed -i {script} {path} && "
+        f'[ "$(grep -cxF -- {new} {path})" = 1 ] && [ "$(grep -cxF -- {old} {path})" = 0 ] || '
+        f"{{ echo {expected_new}; exit 1; }}"
+    )
+
+
+def build_command(env: Env) -> str:
+    return (
+        f"cd {q(port_dir(env) + '/src')} && start=$(date +%s) && make clean && make all -j6 && "
+        '{ [ -f ../bin/ageland ] && [ "$(stat -c %Y ../bin/ageland)" -ge "$start" ] || '
+        "{ echo 'make finished but ../bin/ageland was not rebuilt'; exit 1; }; }"
+    )
+
+
+def revert_command(env: Env) -> str:
+    base = port_dir(env)
+    return (
+        f"cd {q(base + '/src')} && cp -p backup/lib-text/* {q(base + '/' + HELP_DIR)}/ && "
+        "find backup -mindepth 1 -maxdepth 1 ! -name lib-text -exec cp -rp -t . {} + && make all -j6"
+    )

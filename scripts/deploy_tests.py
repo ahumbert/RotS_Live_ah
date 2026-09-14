@@ -362,5 +362,196 @@ class CreateTagTest(GitRepoTestCase):
         self.assertIn("Help changes since test-2026-09-13: none", self.tag_contents(name))
 
 
+# ---------------------------------------------------------------------------------------------
+# Remote commands, run locally with sh against a fake port directory
+# ---------------------------------------------------------------------------------------------
+
+
+class RemoteCommandTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name) / "port"
+        for sub in ("src", "bin", "lib/text"):
+            (self.root / sub).mkdir(parents=True)
+        (self.root / "src" / "game.cpp").write_text("old source\n")
+        (self.root / "src" / "game.o").write_text("old object\n")
+        (self.root / "lib" / "text" / "help_tbl").write_text("old help\n#~\n")
+
+    def sh(self, command: str) -> subprocess.CompletedProcess:
+        local = command.replace(deploy.port_dir(TEST_ENV), str(self.root))
+        self.assertNotIn("/rots/", local)
+        return subprocess.run(["sh", "-c", local], capture_output=True, text=True)
+
+
+class MissingDirsCommandTest(RemoteCommandTestCase):
+    def test_passes_when_src_bin_and_lib_text_exist(self) -> None:
+        self.assertEqual(self.sh(deploy.missing_dirs_command(TEST_ENV)).returncode, 0)
+
+    def test_names_a_missing_directory(self) -> None:
+        (self.root / "bin").rmdir()
+
+        result = self.sh(deploy.missing_dirs_command(TEST_ENV))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing directory:", result.stdout)
+        self.assertIn("/bin", result.stdout)
+
+
+@unittest.skipIf(os.geteuid() == 0, "root can write everything")
+class UnwritableCommandTest(RemoteCommandTestCase):
+    def test_prints_nothing_when_everything_is_writable(self) -> None:
+        result = self.sh(deploy.unwritable_command(TEST_ENV, ["help_tbl", "not_there_tbl"]))
+
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
+
+    def test_lists_unwritable_source_and_help_files(self) -> None:
+        (self.root / "src" / "game.cpp").chmod(0o444)
+        (self.root / "lib" / "text" / "help_tbl").chmod(0o444)
+
+        output = self.sh(deploy.unwritable_command(TEST_ENV, ["help_tbl"])).stdout
+
+        self.assertIn(f"{self.root}/src/game.cpp", output)
+        self.assertIn(f"{self.root}/lib/text/help_tbl", output)
+
+
+class ChownCommandTest(unittest.TestCase):
+    def test_is_valid_sh_and_targets_the_ssh_user(self) -> None:
+        command = deploy.chown_command(TEST_ENV, "someone", ["help_tbl"])
+
+        self.assertEqual(subprocess.run(["sh", "-n", "-c", command]).returncode, 0)
+        self.assertIn("sudo chown -R someone /rots/zzz-forge-test/src /rots/zzz-forge-test/bin", command)
+        self.assertIn("sudo chown someone /rots/zzz-forge-test/lib/text", command)
+
+
+class BackupCommandTest(RemoteCommandTestCase):
+    def test_copies_src_and_help_files_keeping_timestamps(self) -> None:
+        stamp = time.time() - 3600
+        os.utime(self.root / "src" / "game.o", (stamp, stamp))
+
+        result = self.sh(deploy.backup_command(TEST_ENV, ["help_tbl", "not_there_tbl"]))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        backup = self.root / "src" / "backup"
+        self.assertEqual((backup / "game.cpp").read_text(), "old source\n")
+        self.assertEqual(int((backup / "game.o").stat().st_mtime), int(stamp))
+        self.assertEqual((backup / "lib-text" / "help_tbl").read_text(), "old help\n#~\n")
+        self.assertFalse((backup / "lib-text" / "not_there_tbl").exists())
+        self.assertFalse((self.root / "src" / "backup.new").exists())
+
+    def test_second_run_replaces_the_backup_without_nesting(self) -> None:
+        self.assertEqual(self.sh(deploy.backup_command(TEST_ENV, ["help_tbl"])).returncode, 0)
+        (self.root / "src" / "backup" / "stale.txt").write_text("from an older backup\n")
+        (self.root / "src" / "game.cpp").write_text("newer source\n")
+
+        self.assertEqual(self.sh(deploy.backup_command(TEST_ENV, ["help_tbl"])).returncode, 0)
+
+        backup = self.root / "src" / "backup"
+        self.assertEqual((backup / "game.cpp").read_text(), "newer source\n")
+        self.assertFalse((backup / "stale.txt").exists())
+        self.assertFalse((backup / "backup").exists())
+
+    @unittest.skipIf(os.geteuid() == 0, "root can read everything")
+    def test_failed_copy_keeps_the_previous_backup(self) -> None:
+        self.assertEqual(self.sh(deploy.backup_command(TEST_ENV, ["help_tbl"])).returncode, 0)
+        (self.root / "src" / "backup" / "marker.txt").write_text("previous backup\n")
+        unreadable = self.root / "src" / "secret.cpp"
+        unreadable.write_text("x\n")
+        unreadable.chmod(0o000)
+        self.addCleanup(unreadable.chmod, 0o644)
+
+        result = self.sh(deploy.backup_command(TEST_ENV, ["help_tbl"]))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((self.root / "src" / "backup" / "marker.txt").exists())
+
+    def test_revert_restores_source_and_help_files(self) -> None:
+        (self.root / "src" / "Makefile").write_text("all:\n\ttouch ../bin/ageland\n")
+        self.assertEqual(self.sh(deploy.backup_command(TEST_ENV, ["help_tbl"])).returncode, 0)
+        (self.root / "src" / "game.cpp").write_text("broken new source\n")
+        (self.root / "lib" / "text" / "help_tbl").write_text("broken new help\n")
+
+        result = self.sh(deploy.revert_command(TEST_ENV))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "src" / "game.cpp").read_text(), "old source\n")
+        self.assertEqual((self.root / "lib" / "text" / "help_tbl").read_text(), "old help\n#~\n")
+        self.assertFalse((self.root / "src" / "lib-text").exists())
+
+    def test_rejects_an_unsafe_env(self) -> None:
+        with self.assertRaises(deploy.DeployError):
+            deploy.backup_command(deploy.Env("bad", "../etc", deploy.CYAN, backup=True, tag_prefix=None), [])
+
+
+class SourceEditCommandTest(RemoteCommandTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.header = self.root / "src" / "big_brother.h"
+        self.header.write_text("#ifndef USE_BIG_BROTHER\n#define USE_BIG_BROTHER 1\n#endif\n")
+        self.command = deploy.source_edit_command(TEST_ENV, deploy.BIG_BROTHER_OFF)
+
+    def test_turns_big_brother_off(self) -> None:
+        result = self.sh(self.command)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.header.read_text(), "#ifndef USE_BIG_BROTHER\n#define USE_BIG_BROTHER 0\n#endif\n")
+
+    def test_stops_when_the_line_is_already_changed(self) -> None:
+        self.sh(self.command)
+
+        result = self.sh(self.command)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expected exactly one line: #define USE_BIG_BROTHER 1", result.stdout)
+
+    def test_stops_without_editing_when_the_line_appears_twice(self) -> None:
+        original = "#define USE_BIG_BROTHER 1\n#define USE_BIG_BROTHER 1\n"
+        self.header.write_text(original)
+
+        self.assertNotEqual(self.sh(self.command).returncode, 0)
+        self.assertEqual(self.header.read_text(), original)
+
+
+class BuildCommandTest(RemoteCommandTestCase):
+    def test_passes_when_make_rebuilds_the_binary(self) -> None:
+        (self.root / "src" / "Makefile").write_text("clean:\n\trm -f *.o\nall:\n\ttouch ../bin/ageland\n")
+
+        result = self.sh(deploy.build_command(TEST_ENV))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.root / "src" / "game.o").exists())
+
+    def test_fails_when_the_binary_is_stale(self) -> None:
+        (self.root / "src" / "Makefile").write_text("clean:\n\t@true\nall:\n\t@true\n")
+        binary = self.root / "bin" / "ageland"
+        binary.write_text("old")
+        os.utime(binary, (time.time() - 3600, time.time() - 3600))
+
+        result = self.sh(deploy.build_command(TEST_ENV))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not rebuilt", result.stdout)
+
+    def test_fails_when_make_fails(self) -> None:
+        (self.root / "src" / "Makefile").write_text("clean:\n\t@true\nall:\n\t@false\n")
+
+        self.assertNotEqual(self.sh(deploy.build_command(TEST_ENV)).returncode, 0)
+
+
+class SftpBatchTest(unittest.TestCase):
+    def test_uploads_src_then_each_help_file(self) -> None:
+        batch = deploy.sftp_batch(TEST_ENV, Path("/home/me/RotS"), ["help", "help_tbl"])
+
+        self.assertEqual(batch, "\n".join([
+            'lcd "/home/me/RotS/src"',
+            'cd "/rots/zzz-forge-test/src"',
+            "put -r *",
+            'lcd "/home/me/RotS/lib/text"',
+            'cd "/rots/zzz-forge-test/lib/text"',
+            'put "help"',
+            'put "help_tbl"',
+        ]) + "\n")
+
+
 if __name__ == "__main__":
     unittest.main()
