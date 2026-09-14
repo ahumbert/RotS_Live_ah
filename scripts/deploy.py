@@ -102,9 +102,12 @@ class Server:
         return f"{self.user}@{self.host}"
 
 
+LOGIN_PART_PATTERN = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]*$")
+
+
 def parse_login(value: str) -> Tuple[str, str]:
     user, _, host = value.partition("@")
-    if value.count("@") != 1 or not user or not host:
+    if (value.count("@") != 1 or not LOGIN_PART_PATTERN.match(user) or not LOGIN_PART_PATTERN.match(host)):
         raise argparse.ArgumentTypeError(f"expected <user>@<host>, got {value!r}")
     return user, host
 
@@ -434,7 +437,7 @@ class SshRunner:
 
     def remote_args(self, command: str, tty: bool = False) -> List[str]:
         return ["ssh", "-S", str(self.socket), *(["-t"] if tty else []), "-p", str(self.server.port),
-                self.server.login, command]
+                self.server.login, "sh -c " + shlex.quote(command)]
 
     def sftp_args(self, batch_path: Path) -> List[str]:
         return ["sftp", "-o", f"ControlPath={self.socket}", "-P", str(self.server.port), "-b", str(batch_path),
@@ -511,7 +514,10 @@ def dry_run_plan(env: Env, server: Server, repo: Path, help_names: Sequence[str]
     def ssh(command: str, tty: bool = False) -> str:
         return "  " + shlex.join(shell.remote_args(command, tty))
 
-    lines = ["Dry run: nothing below is executed.", f"== 2. {STEP_TITLES[2]}", "  " + shlex.join(shell.connect_args())]
+    lines = ["Dry run: nothing below is executed.", f"== 1. {STEP_TITLES[1]}",
+              f"  would run 'git pull --ff-only' when the checkout is on {DEPLOY_BRANCH!r}; "
+              "the commit shown above is the checkout before that pull."]
+    lines += [f"== 2. {STEP_TITLES[2]}", "  " + shlex.join(shell.connect_args())]
     lines += [f"== 3. {STEP_TITLES[3]}", ssh(missing_dirs_command(env)), ssh(unwritable_command(env, help_names)),
               "  only if something is unwritable:", ssh(chown_command(env, server.user, help_names), tty=True)]
     lines += [f"== 4. {STEP_TITLES[4]}",
@@ -601,6 +607,9 @@ def deploy(env: Env, server: Server, checkout, runner, *, dry_run: bool, color: 
     except KeyboardInterrupt:
         out(failure_report(env, step, "interrupted", color))
         return 130
+    except Exception as error:
+        out(failure_report(env, step, f"unexpected error: {error!r}", color))
+        raise
     finally:
         runner.close()
 

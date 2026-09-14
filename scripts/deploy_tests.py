@@ -5,6 +5,7 @@ import datetime
 import importlib.util
 import io
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,7 @@ SPEC = importlib.util.spec_from_file_location("deploy", MODULE_PATH)
 deploy = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 sys.modules["deploy"] = deploy
+sys.dont_write_bytecode = True
 SPEC.loader.exec_module(deploy)
 
 TEST_ENV = deploy.ENVS["zzz-forge-test"]
@@ -95,6 +97,15 @@ class ArgumentsTest(unittest.TestCase):
     def test_login_needs_exactly_one_at_with_both_sides(self) -> None:
         for bad in ("example.org", "a@b@c", "@example.org", "someone@"):
             self.assert_usage_error("deploy", "live", bad, "2222")
+
+    def test_login_cannot_smuggle_ssh_options(self) -> None:
+        for bad in ("-oProxyCommand=x@example.org", "someone@-oProxyCommand=x", "some one@example.org"):
+            self.assert_usage_error("deploy", "live", bad, "2222")
+
+    def test_login_with_dots_underscores_and_hyphens_parses(self) -> None:
+        args = self.parse("deploy", "live", "some.one_2@host-1.example.org", "2222")
+
+        self.assertEqual(args.login, ("some.one_2", "host-1.example.org"))
 
     def test_port_must_be_a_valid_number(self) -> None:
         for bad in ("ssh", "0", "70000", "-1", "22.0"):
@@ -568,8 +579,15 @@ class SshRunnerTest(unittest.TestCase):
 
     def test_remote_reuses_the_master_and_can_request_a_tty(self) -> None:
         self.assertEqual(self.runner.remote_args("make"), ["ssh", "-S", "/tmp/rots-deploy-test/ssh-master", "-p", "2222",
-                                                           "someone@example.org", "make"])
+                                                           "someone@example.org", "sh -c make"])
         self.assertEqual(self.runner.remote_args("sudo true", tty=True)[3], "-t")
+
+    def test_remote_wraps_the_command_in_sh_dash_c_so_it_survives_any_login_shell(self) -> None:
+        command = '[ -d "$d" ] || { echo "a b"; exit 1; }'
+
+        args = self.runner.remote_args(command)
+
+        self.assertEqual(shlex.split(args[-1]), ["sh", "-c", command])
 
     def test_sftp_reuses_the_master(self) -> None:
         self.assertEqual(self.runner.sftp_args(Path("/tmp/b")), ["sftp", "-o",
@@ -787,6 +805,22 @@ class DeployTest(unittest.TestCase):
         self.assertEqual(self.runner.kinds(), ["close"])
         self.assertIn("FAILED at step 2 (connect): interrupted", self.text())
 
+    def test_unexpected_exception_still_produces_a_report_and_closes(self) -> None:
+        runner = FakeRunner()
+
+        def raising_sftp(batch):
+            runner.calls.append(("sftp", batch))
+            raise OSError("disk full")
+
+        runner.sftp = raising_sftp
+
+        with self.assertRaises(OSError):
+            self.run_deploy("test", runner=runner)
+
+        self.assertIn("FAILED at step 5", self.text())
+        self.assertIn("unexpected error", self.text())
+        self.assertEqual(self.runner.kinds()[-1], "close")
+
     def test_dry_run_prints_every_step_and_runs_nothing_remote(self) -> None:
         for name in deploy.ENVS:
             with self.subTest(env=name):
@@ -795,10 +829,11 @@ class DeployTest(unittest.TestCase):
                 self.assertEqual(self.runner.kinds(), ["close"])
                 self.assertEqual(self.checkout.prepared, [True])
                 self.assertEqual(self.checkout.tags, [])
-                for number in range(2, 9):
+                for number in range(1, 9):
                     self.assertIn(f"== {number}. {deploy.STEP_TITLES[number]}", self.text())
                 self.assertIn("ssh -M -S", self.text())
                 self.assertIn('put "help_tbl"', self.text())
+                self.assertIn("git pull --ff-only", self.text())
 
     def test_warnings_are_shown(self) -> None:
         self.run_deploy("zzz-forge-test", checkout=FakeCheckout(warnings=["on 'feat/x'"]))
