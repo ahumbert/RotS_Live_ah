@@ -321,12 +321,12 @@ def missing_dirs_command(env: Env) -> str:
     return f'for d in {dirs}; do [ -d "$d" ] || {{ echo "missing directory: $d"; exit 1; }}; done'
 
 
-def unfinished_deploy_command(env: Env) -> str:
+def unfinished_deploy_command(env: Env, server: Server) -> str:
     """Refuses to continue when the previous deploy to this env did not finish."""
     base = port_dir(env)
     marker = q(f"{base}/src/{DEPLOY_MARKER}")
     message = q(f"{DEPLOY_MARKER} is present in {base}/src; the previous deploy did not finish. "
-                "Revert it (see the failure report) before deploying again.")
+                f"Run scripts/deploy.py revert {env.name} {server.login} {server.port} before deploying again.")
     return f'[ ! -e {marker} ] || {{ echo {message}; exit 1; }}'
 
 
@@ -595,7 +595,7 @@ def dry_run_plan(env: Env, server: Server, repo: Path, help_names: Sequence[str]
     lines += [f"== 2. {STEP_TITLES[2]}", "  " + shlex.join(shell.connect_args())]
     step3 = [f"== 3. {STEP_TITLES[3]}", ssh(missing_dirs_command(env))]
     if env.backup:
-        step3.append(ssh(unfinished_deploy_command(env)))
+        step3.append(ssh(unfinished_deploy_command(env, server)))
     step3 += [ssh(unwritable_command(env, help_names)), "  only if something is unwritable (no sudo):",
               ssh(chmod_owned_command(env, help_names)),
               "  only if something is still unwritable (sudo), then chmod again and re-check:",
@@ -656,7 +656,7 @@ def deploy(env: Env, server: Server, checkout, runner, *, dry_run: bool, color: 
         begin(3)
         runner.remote(missing_dirs_command(env))
         if env.backup:
-            runner.remote(unfinished_deploy_command(env))
+            runner.remote(unfinished_deploy_command(env, server))
         unwritable = _lines(runner.remote(unwritable_command(env, help_names), capture=True))
         if unwritable:
             out(f"Not writable by {server.user}:\n  " + "\n  ".join(unwritable))

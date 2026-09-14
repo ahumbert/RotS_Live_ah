@@ -427,16 +427,18 @@ class DeployMarkerCommandTest(RemoteCommandTestCase):
         return self.root / "src" / deploy.DEPLOY_MARKER
 
     def test_unfinished_check_passes_without_the_marker(self) -> None:
-        self.assertEqual(self.sh(deploy.unfinished_deploy_command(TEST_ENV)).returncode, 0)
+        self.assertEqual(self.sh(deploy.unfinished_deploy_command(TEST_ENV, SERVER)).returncode, 0)
 
-    def test_unfinished_check_fails_and_explains_when_the_marker_is_present(self) -> None:
+    def test_unfinished_check_fails_and_names_the_revert_command_when_the_marker_is_present(self) -> None:
         self.marker().write_text("")
 
-        result = self.sh(deploy.unfinished_deploy_command(TEST_ENV))
+        result = self.sh(deploy.unfinished_deploy_command(TEST_ENV, SERVER))
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("DEPLOY_IN_PROGRESS", result.stdout)
         self.assertIn("did not finish", result.stdout)
+        self.assertIn("scripts/deploy.py revert zzz-forge-test someone@example.org 2222", result.stdout)
+        self.assertNotIn("see the failure report", result.stdout)
 
     def test_mark_started_creates_the_marker(self) -> None:
         result = self.sh(deploy.mark_deploy_started_command(TEST_ENV))
@@ -1123,7 +1125,7 @@ class DeployTest(unittest.TestCase):
                 def ssh_line(command: str) -> str:
                     return "  " + shlex.join(shell.remote_args(command))
 
-                marker_lines = [ssh_line(deploy.unfinished_deploy_command(env)),
+                marker_lines = [ssh_line(deploy.unfinished_deploy_command(env, SERVER)),
                                 ssh_line(deploy.mark_deploy_started_command(env)),
                                 ssh_line(deploy.mark_deploy_finished_command(env))]
                 for line in marker_lines:
