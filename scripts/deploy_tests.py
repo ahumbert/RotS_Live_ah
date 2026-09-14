@@ -409,6 +409,40 @@ class MissingDirsCommandTest(RemoteCommandTestCase):
         self.assertIn("/bin", result.stdout)
 
 
+class DeployMarkerCommandTest(RemoteCommandTestCase):
+    def marker(self) -> Path:
+        return self.root / "src" / deploy.DEPLOY_MARKER
+
+    def test_unfinished_check_passes_without_the_marker(self) -> None:
+        self.assertEqual(self.sh(deploy.unfinished_deploy_command(TEST_ENV)).returncode, 0)
+
+    def test_unfinished_check_fails_and_explains_when_the_marker_is_present(self) -> None:
+        self.marker().write_text("")
+
+        result = self.sh(deploy.unfinished_deploy_command(TEST_ENV))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("DEPLOY_IN_PROGRESS", result.stdout)
+        self.assertIn("did not finish", result.stdout)
+
+    def test_mark_started_creates_the_marker(self) -> None:
+        result = self.sh(deploy.mark_deploy_started_command(TEST_ENV))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.marker().exists())
+
+    def test_mark_finished_removes_the_marker(self) -> None:
+        self.marker().write_text("")
+
+        result = self.sh(deploy.mark_deploy_finished_command(TEST_ENV))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.marker().exists())
+
+    def test_mark_finished_is_a_no_op_when_the_marker_is_already_gone(self) -> None:
+        self.assertEqual(self.sh(deploy.mark_deploy_finished_command(TEST_ENV)).returncode, 0)
+
+
 @unittest.skipIf(os.geteuid() == 0, "root can write everything")
 class UnwritableCommandTest(RemoteCommandTestCase):
     def test_prints_nothing_when_everything_is_writable(self) -> None:
@@ -481,6 +515,7 @@ class BackupCommandTest(RemoteCommandTestCase):
         self.assertEqual(self.sh(deploy.backup_command(TEST_ENV, ["help_tbl"])).returncode, 0)
         (self.root / "src" / "game.cpp").write_text("broken new source\n")
         (self.root / "lib" / "text" / "help_tbl").write_text("broken new help\n")
+        (self.root / "src" / deploy.DEPLOY_MARKER).write_text("")
 
         result = self.sh(deploy.revert_command(TEST_ENV))
 
@@ -488,6 +523,33 @@ class BackupCommandTest(RemoteCommandTestCase):
         self.assertEqual((self.root / "src" / "game.cpp").read_text(), "old source\n")
         self.assertEqual((self.root / "lib" / "text" / "help_tbl").read_text(), "old help\n#~\n")
         self.assertFalse((self.root / "src" / "lib-text").exists())
+        self.assertFalse((self.root / "src" / deploy.DEPLOY_MARKER).exists())
+
+    def test_revert_relinks_even_when_the_binary_is_newer_than_the_restored_objects(self) -> None:
+        (self.root / "src" / "Makefile").write_text(
+            "all: ../bin/ageland\n../bin/ageland: game.o\n\ttouch ../bin/ageland\n")
+        stale = time.time() - 3600
+        os.utime(self.root / "src" / "game.o", (stale, stale))
+        self.assertEqual(self.sh(deploy.backup_command(TEST_ENV, ["help_tbl"])).returncode, 0)
+        binary = self.root / "bin" / "ageland"
+        binary.write_text("newer than the backed-up object")
+        newer = time.time() - 10
+        os.utime(binary, (newer, newer))
+
+        result = self.sh(deploy.revert_command(TEST_ENV))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertGreater(binary.stat().st_mtime, newer)
+
+    def test_revert_tolerates_an_empty_help_backup(self) -> None:
+        (self.root / "src" / "Makefile").write_text("all:\n\ttouch ../bin/ageland\n")
+        # A help name that does not exist on the server, so backup/lib-text ends up empty.
+        self.assertEqual(self.sh(deploy.backup_command(TEST_ENV, ["not_there_tbl"])).returncode, 0)
+        self.assertEqual(list((self.root / "src" / "backup" / "lib-text").iterdir()), [])
+
+        result = self.sh(deploy.revert_command(TEST_ENV))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_rejects_an_unsafe_env(self) -> None:
         with self.assertRaises(deploy.DeployError):
@@ -628,6 +690,61 @@ class RunCommandTest(unittest.TestCase):
 # ---------------------------------------------------------------------------------------------
 
 
+class FailureReportTest(unittest.TestCase):
+    def test_steps_1_to_4_say_contents_are_unchanged(self) -> None:
+        for step in (1, 2, 3, 4):
+            with self.subTest(step=step):
+                report = deploy.failure_report(TEST_ENV, step, "boom", color=False)
+
+                self.assertIn("the source and help file contents on the server are unchanged", report)
+
+    def test_steps_5_to_7_on_a_backup_env_warn_the_next_deploy_will_refuse_to_run(self) -> None:
+        for step in (5, 6, 7):
+            with self.subTest(step=step):
+                report = deploy.failure_report(TEST_ENV, step, "boom", color=False)
+
+                self.assertIn(f"To revert: {deploy.revert_command(TEST_ENV)}", report)
+                self.assertIn(deploy.DEPLOY_MARKER, report)
+                self.assertIn("refuse to run", report)
+
+    def test_step_7_warns_the_binary_may_have_been_relinked_away(self) -> None:
+        report = deploy.failure_report(TEST_ENV, 7, "boom", color=False)
+
+        self.assertIn("../bin/ageland~", report)
+        self.assertIn("restart", report)
+
+    def test_step_7_interrupted_warns_the_remote_make_may_still_be_running(self) -> None:
+        report = deploy.failure_report(TEST_ENV, 7, "interrupted", color=False)
+
+        self.assertIn("remote make may still be running", report)
+
+    def test_step_7_not_interrupted_has_no_still_running_warning(self) -> None:
+        report = deploy.failure_report(TEST_ENV, 7, "boom", color=False)
+
+        self.assertNotIn("still be running", report)
+
+    def test_step_8_is_unchanged(self) -> None:
+        report = deploy.failure_report(TEST_ENV, 8, "boom", color=False)
+
+        self.assertIn("only the local tag failed", report)
+
+    def test_coders_keeps_the_no_backup_line_plus_the_ageland_warning_at_step_7(self) -> None:
+        coders = deploy.ENVS["coders"]
+
+        report = deploy.failure_report(coders, 7, "boom", color=False)
+
+        self.assertIn("keeps no backup", report)
+        self.assertIn("../bin/ageland~", report)
+
+    def test_coders_at_steps_5_and_6_has_no_ageland_warning(self) -> None:
+        for step in (5, 6):
+            with self.subTest(step=step):
+                report = deploy.failure_report(deploy.ENVS["coders"], step, "boom", color=False)
+
+                self.assertIn("keeps no backup", report)
+                self.assertNotIn("ageland~", report)
+
+
 class FakeCheckout:
     repo = Path("/home/me/RotS")
 
@@ -686,6 +803,12 @@ class FakeRunner:
         for call in self.calls:
             if call[0] != "remote":
                 labels.append(call[0])
+            elif call[1].startswith("touch ") and deploy.DEPLOY_MARKER in call[1]:
+                labels.append("mark")
+            elif call[1].startswith("rm -f ") and deploy.DEPLOY_MARKER in call[1]:
+                labels.append("finish")
+            elif deploy.DEPLOY_MARKER in call[1]:
+                labels.append("unfinished")
             elif "sudo chown" in call[1]:
                 labels.append("chown")
             elif "backup.new" in call[1]:
@@ -721,7 +844,8 @@ class DeployTest(unittest.TestCase):
         status = self.run_deploy("test")
 
         self.assertEqual(status, 0)
-        self.assertEqual(self.runner.kinds(), ["connect", "dirs", "unwritable", "backup", "sftp", "build", "close"])
+        self.assertEqual(self.runner.kinds(), ["connect", "dirs", "unfinished", "unwritable", "backup", "mark",
+                                               "sftp", "build", "finish", "close"])
         self.assertEqual(self.checkout.tags, [("test", "abc1234def5678", ["help", "help_tbl"], self.DAY)])
         self.assertEqual(self.checkout.prepared, [False])
         self.assertIn("Tag: test-2026-09-13.", self.text())
@@ -730,13 +854,14 @@ class DeployTest(unittest.TestCase):
     def test_4k_edits_the_source_after_upload_and_before_build(self) -> None:
         self.assertEqual(self.run_deploy("4k"), 0)
 
-        self.assertEqual(self.runner.kinds(), ["connect", "dirs", "unwritable", "backup", "sftp", "edit", "build", "close"])
+        self.assertEqual(self.runner.kinds(), ["connect", "dirs", "unfinished", "unwritable", "backup", "mark",
+                                               "sftp", "edit", "build", "finish", "close"])
         self.assertIn("USE_BIG_BROTHER", self.text())
 
     def test_coders_skips_the_backup(self) -> None:
         self.assertEqual(self.run_deploy("coders"), 0)
 
-        self.assertNotIn("backup", self.runner.kinds())
+        self.assertEqual(self.runner.kinds(), ["connect", "dirs", "unwritable", "sftp", "build", "close"])
 
     def test_test_target_is_not_tagged(self) -> None:
         self.assertEqual(self.run_deploy("zzz-forge-test"), 0)
@@ -761,12 +886,22 @@ class DeployTest(unittest.TestCase):
         self.assertIn("Nothing was uploaded", self.text())
         self.assertEqual(self.checkout.tags, [])
 
+    def test_unfinished_deploy_marker_stops_before_backup(self) -> None:
+        runner = FakeRunner(fail_when=lambda call: call[0] == "remote" and "did not finish" in call[1])
+
+        self.assertEqual(self.run_deploy("test", runner=runner), 1)
+
+        self.assertEqual(self.runner.kinds(), ["connect", "dirs", "unfinished", "close"])
+        self.assertIn("FAILED at step 3", self.text())
+        self.assertEqual(self.checkout.tags, [])
+
     def test_unwritable_files_are_chowned_with_a_tty_then_rechecked(self) -> None:
         runner = FakeRunner(unwritable=["/rots/dev-building4802/src/game.cpp\n", ""])
 
         self.assertEqual(self.run_deploy("test", runner=runner), 0)
 
-        self.assertEqual(self.runner.kinds()[:5], ["connect", "dirs", "unwritable", "chown", "unwritable"])
+        self.assertEqual(self.runner.kinds()[:6],
+                         ["connect", "dirs", "unfinished", "unwritable", "chown", "unwritable"])
         chown = [call for call in self.runner.calls if call[0] == "remote" and "sudo chown" in call[1]][0]
         self.assertTrue(chown[2])
         self.assertIn("/rots/dev-building4802/src/game.cpp", self.text())
@@ -834,6 +969,20 @@ class DeployTest(unittest.TestCase):
                 self.assertIn("ssh -M -S", self.text())
                 self.assertIn('put "help_tbl"', self.text())
                 self.assertIn("git pull --ff-only", self.text())
+                env = deploy.ENVS[name]
+                shell = deploy.SshRunner(SERVER, Path(deploy.SOCKET_PARENT) / "rots-deploy-XXXXXX")
+
+                def ssh_line(command: str) -> str:
+                    return "  " + shlex.join(shell.remote_args(command))
+
+                marker_lines = [ssh_line(deploy.unfinished_deploy_command(env)),
+                                ssh_line(deploy.mark_deploy_started_command(env)),
+                                ssh_line(deploy.mark_deploy_finished_command(env))]
+                for line in marker_lines:
+                    if env.backup:
+                        self.assertIn(line, self.text())
+                    else:
+                        self.assertNotIn(line, self.text())
 
     def test_warnings_are_shown(self) -> None:
         self.run_deploy("zzz-forge-test", checkout=FakeCheckout(warnings=["on 'feat/x'"]))

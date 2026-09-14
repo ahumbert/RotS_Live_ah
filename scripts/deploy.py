@@ -23,6 +23,7 @@ from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEPLOY_BRANCH = "release-frodo"
 HELP_DIR = "lib/text"
+DEPLOY_MARKER = "DEPLOY_IN_PROGRESS"  # relative to the port's src/; only used for envs with backup=True
 PORT_DIR_PATTERN = re.compile(r"^/rots/[a-z0-9-]+$")
 # The ssh control socket has to fit in a Unix socket path (about 108 bytes), so it lives under
 # /tmp rather than a possibly long $TMPDIR.
@@ -317,6 +318,25 @@ def missing_dirs_command(env: Env) -> str:
     return f'for d in {dirs}; do [ -d "$d" ] || {{ echo "missing directory: $d"; exit 1; }}; done'
 
 
+def unfinished_deploy_command(env: Env) -> str:
+    """Refuses to continue when the previous deploy to this env did not finish."""
+    base = port_dir(env)
+    marker = q(f"{base}/src/{DEPLOY_MARKER}")
+    message = q(f"{DEPLOY_MARKER} is present in {base}/src; the previous deploy did not finish. "
+                "Revert it (see the failure report) before deploying again.")
+    return f'[ ! -e {marker} ] || {{ echo {message}; exit 1; }}'
+
+
+def mark_deploy_started_command(env: Env) -> str:
+    base = port_dir(env)
+    return f"touch {q(f'{base}/src/{DEPLOY_MARKER}')}"
+
+
+def mark_deploy_finished_command(env: Env) -> str:
+    base = port_dir(env)
+    return f"rm -f {q(f'{base}/src/{DEPLOY_MARKER}')}"
+
+
 def unwritable_command(env: Env, help_names: Sequence[str]) -> str:
     """Prints one line per path the ssh user cannot write, and nothing when everything is writable."""
     base = port_dir(env)
@@ -404,10 +424,18 @@ def build_command(env: Env) -> str:
 
 def revert_command(env: Env) -> str:
     base = port_dir(env)
-    return (
-        f"cd {q(base + '/src')} && cp -p backup/lib-text/* {q(base + '/' + HELP_DIR)}/ && "
-        "find backup -mindepth 1 -maxdepth 1 ! -name lib-text -exec cp -rp -t . {} + && make all -j6"
-    )
+    text_dir = q(f"{base}/{HELP_DIR}")
+    marker = q(f"{base}/src/{DEPLOY_MARKER}")
+    return " && ".join([
+        f"cd {q(base + '/src')}",
+        # No bare glob, so an empty backup/lib-text is fine.
+        f"find backup/lib-text -mindepth 1 -maxdepth 1 -exec cp -p -t {text_dir} {{}} +",
+        "find backup -mindepth 1 -maxdepth 1 ! -name lib-text -exec cp -rp -t . {} +",
+        # Force make to relink even when ../bin/ageland is newer than the restored objects.
+        "find . -maxdepth 1 -name '*.o' -exec touch {} +",
+        "make all -j6",
+        f"rm -f {marker}",
+    ])
 
 
 # ---------------------------------------------------------------------------------------------
@@ -498,13 +526,21 @@ def banner(env: Env, server: Server, sha: str, subject: str, help_names: Sequenc
 def failure_report(env: Env, step: int, detail: str, color: bool) -> str:
     lines = [paint(f"FAILED at step {step} ({STEP_TITLES[step]}): {detail}", BOLD_RED, color)]
     if step <= 4:
-        lines.append("Nothing was uploaded; the source and help files on the server are unchanged.")
+        # Step 3's sudo chown may have changed ownership, so "unchanged" only promises contents.
+        lines.append("Nothing was uploaded; the source and help file contents on the server are unchanged.")
     elif step == 8:
         lines.append("The upload and build finished; only the local tag failed.")
     elif env.backup:
         lines.append(f"To revert: {revert_command(env)}")
+        lines.append(f"The next deploy will refuse to run until this one is reverted, because "
+                      f"{port_dir(env)}/src/{DEPLOY_MARKER} is present.")
     else:
         lines.append(f"{env.name} keeps no backup; to revert, deploy the previous commit.")
+    if step == 7:
+        lines.append("../bin/ageland may have been moved to ../bin/ageland~ by the link step; "
+                      "do not restart the port until a build (or the revert) succeeds.")
+        if detail == "interrupted":
+            lines.append("The remote make may still be running; wait for it to finish before reverting.")
     return "\n".join(lines)
 
 
@@ -518,15 +554,25 @@ def dry_run_plan(env: Env, server: Server, repo: Path, help_names: Sequence[str]
               f"  would run 'git pull --ff-only' when the checkout is on {DEPLOY_BRANCH!r}; "
               "the commit shown above is the checkout before that pull."]
     lines += [f"== 2. {STEP_TITLES[2]}", "  " + shlex.join(shell.connect_args())]
-    lines += [f"== 3. {STEP_TITLES[3]}", ssh(missing_dirs_command(env)), ssh(unwritable_command(env, help_names)),
-              "  only if something is unwritable:", ssh(chown_command(env, server.user, help_names), tty=True)]
+    step3 = [f"== 3. {STEP_TITLES[3]}", ssh(missing_dirs_command(env))]
+    if env.backup:
+        step3.append(ssh(unfinished_deploy_command(env)))
+    step3 += [ssh(unwritable_command(env, help_names)), "  only if something is unwritable:",
+              ssh(chown_command(env, server.user, help_names), tty=True)]
+    lines += step3
     lines += [f"== 4. {STEP_TITLES[4]}",
               ssh(backup_command(env, help_names)) if env.backup else "  skipped: this env keeps no backup"]
-    lines += [f"== 5. {STEP_TITLES[5]}", "  " + shlex.join(shell.sftp_args(shell.work_dir / "upload.sftp")),
-              "  batch file:"]
+    step5 = [f"== 5. {STEP_TITLES[5]}"]
+    if env.backup:
+        step5.append(ssh(mark_deploy_started_command(env)))
+    step5 += ["  " + shlex.join(shell.sftp_args(shell.work_dir / "upload.sftp")), "  batch file:"]
+    lines += step5
     lines += ["    " + line for line in sftp_batch(env, repo, help_names).splitlines()]
     lines += [f"== 6. {STEP_TITLES[6]}"] + ([ssh(source_edit_command(env, e)) for e in env.source_edits] or ["  none"])
-    lines += [f"== 7. {STEP_TITLES[7]}", ssh(build_command(env))]
+    step7 = [f"== 7. {STEP_TITLES[7]}", ssh(build_command(env))]
+    if env.backup:
+        step7.append(ssh(mark_deploy_finished_command(env)))
+    lines += step7
     lines += [f"== 8. {STEP_TITLES[8]}",
               f"  git tag -a {env.tag_prefix}YYYY-MM-DD[-N] <sha>" if env.tag_prefix else "  none: test target"]
     lines += ["== close", "  " + shlex.join(shell.close_args())]
@@ -568,6 +614,8 @@ def deploy(env: Env, server: Server, checkout, runner, *, dry_run: bool, color: 
 
         begin(3)
         runner.remote(missing_dirs_command(env))
+        if env.backup:
+            runner.remote(unfinished_deploy_command(env))
         unwritable = _lines(runner.remote(unwritable_command(env, help_names), capture=True))
         if unwritable:
             out(f"Not writable by {server.user}:\n  " + "\n  ".join(unwritable))
@@ -584,6 +632,8 @@ def deploy(env: Env, server: Server, checkout, runner, *, dry_run: bool, color: 
             out(f"{env.name} keeps no backup; skipping.")
 
         begin(5)
+        if env.backup:
+            runner.remote(mark_deploy_started_command(env))
         runner.sftp(sftp_batch(env, checkout.repo, help_names))
 
         begin(6)
@@ -594,6 +644,8 @@ def deploy(env: Env, server: Server, checkout, runner, *, dry_run: bool, color: 
 
         begin(7)
         runner.remote(build_command(env))
+        if env.backup:
+            runner.remote(mark_deploy_finished_command(env))
 
         begin(8)
         if env.tag_prefix:
