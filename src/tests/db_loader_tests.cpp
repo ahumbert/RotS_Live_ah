@@ -2252,6 +2252,133 @@ TEST(DbLoader, ReservesTheAddressADirectoryAccountDeclaresAsWellAsTheOneItIsFile
     EXPECT_TRUE(declared_reserved) << "so must the address it declares -- that is the one its owner types";
 }
 
+TEST(DbLoader, RecordsAnAccountRecordQuarantinedAtBootSoAnImmortalCanAskAboutIt)
+{
+    // `account errors` is the one place an immortal can ask what went wrong since the last reboot.
+    // A quarantined account locks its owner out entirely, so it belongs in that list beside the
+    // character files the boot walk could not read -- not only in `account index`.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+
+    ASSERT_EQ(mkdir("accounts", 0700), 0);
+    ASSERT_EQ(mkdir("accounts/A-E", 0700), 0);
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(".", "alpha-admin", "bob@example.com", "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
+    {
+        std::FILE* file = std::fopen("accounts/A-E/bob@example.com/account.json", "w");
+        ASSERT_NE(file, nullptr);
+        std::fputs("{\"version\": 1, \"account_name\": \"alpha-adm", file);
+        std::fclose(file);
+    }
+
+    account_index::clear();
+    account_index::set_root_directory(".");
+    account_index::set_enabled(true);
+    account_errors::clear();
+
+    build_account_native_player_index();
+
+    const std::vector<account_errors::Entry> recorded = account_errors::recent(10);
+    const std::size_t quarantined = account_index::quarantined_count();
+    account_index::set_enabled(false);
+    account_index::clear();
+    account_errors::clear();
+
+    ASSERT_EQ(quarantined, 1u);
+    ASSERT_EQ(recorded.size(), 1u) << "the quarantined record must be recorded exactly once";
+    EXPECT_EQ(recorded[0].source, account_errors::Source::Boot);
+    EXPECT_EQ(recorded[0].account, "bob@example.com") << "named by the address it is filed under";
+    EXPECT_TRUE(recorded[0].character.empty()) << "a whole account, not one character";
+    EXPECT_FALSE(recorded[0].reason.empty()) << "carrying why it could not be read";
+}
+
+TEST(DbLoader, RecordsAMisfiledAccountRecordOnceEvenThoughTwoAddressesAreReserved)
+{
+    // A record filed under alice@ that declares alice2@ is quarantined under BOTH addresses. That is
+    // one bad record, so it must be one entry -- two would read as two broken accounts.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+
+    ASSERT_EQ(mkdir("accounts", 0700), 0);
+    ASSERT_EQ(mkdir("accounts/A-E", 0700), 0);
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(".", "alpha-admin", "alice2@example.com", "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
+    ASSERT_EQ(rename("accounts/A-E/alice2@example.com", "accounts/A-E/alice@example.com"), 0);
+
+    account_index::clear();
+    account_index::set_root_directory(".");
+    account_index::set_enabled(true);
+    account_errors::clear();
+
+    build_account_native_player_index();
+
+    const std::vector<account_errors::Entry> recorded = account_errors::recent(10);
+    account_index::set_enabled(false);
+    account_index::clear();
+    account_errors::clear();
+
+    ASSERT_EQ(recorded.size(), 1u) << "one misfiled record is one failure";
+    EXPECT_EQ(recorded[0].source, account_errors::Source::Boot);
+    EXPECT_EQ(recorded[0].account, "alice@example.com") << "named by the address it is filed under";
+    EXPECT_NE(recorded[0].reason.find("alice2@example.com"), std::string::npos) << "the reason says which address it declares";
+}
+
+TEST(DbLoader, RecordsAFlatAccountRecordWithNoUsableEmailByItsPath)
+{
+    // A legacy flat record (accounts/<bucket>/<name>.json) that discloses no email is quarantined
+    // under its own path, since it has no address to be keyed by. It is still a locked-out account.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+
+    ASSERT_EQ(mkdir("accounts", 0700), 0);
+    ASSERT_EQ(mkdir("accounts/A-E", 0700), 0);
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(".", "alpha-admin", "bob@example.com", "ValidPass1", 1700010101, nullptr, &error_message)) << error_message;
+    std::string record_text;
+    {
+        std::FILE* file = std::fopen("accounts/A-E/bob@example.com/account.json", "r");
+        ASSERT_NE(file, nullptr);
+        char chunk[4096];
+        std::size_t read_bytes = 0;
+        while ((read_bytes = std::fread(chunk, 1, sizeof(chunk), file)) > 0)
+            record_text.append(chunk, read_bytes);
+        std::fclose(file);
+    }
+    const std::string with_email = "\"normalized_email\": \"bob@example.com\"";
+    const std::size_t at = record_text.find(with_email);
+    ASSERT_NE(at, std::string::npos) << record_text;
+    record_text.replace(at, with_email.size(), "\"normalized_email\": \"\"");
+    std::filesystem::remove_all("accounts/A-E/bob@example.com");
+    {
+        std::FILE* file = std::fopen("accounts/A-E/alpha-admin.json", "w");
+        ASSERT_NE(file, nullptr);
+        std::fputs(record_text.c_str(), file);
+        std::fclose(file);
+    }
+
+    account_index::clear();
+    account_index::set_root_directory(".");
+    account_index::set_enabled(true);
+    account_errors::clear();
+
+    build_account_native_player_index();
+
+    const std::vector<account_errors::Entry> recorded = account_errors::recent(10);
+    const std::size_t quarantined = account_index::quarantined_count();
+    account_index::set_enabled(false);
+    account_index::clear();
+    account_errors::clear();
+
+    ASSERT_EQ(quarantined, 1u) << "the flat record with no email must be quarantined";
+    ASSERT_EQ(recorded.size(), 1u) << "and recorded exactly once";
+    EXPECT_EQ(recorded[0].source, account_errors::Source::Boot);
+    EXPECT_NE(recorded[0].account.find("alpha-admin.json"), std::string::npos) << "named by its path, the only key it has";
+    EXPECT_TRUE(recorded[0].character.empty());
+}
+
 TEST(DbLoader, DoesNotTrustTheIndexWhenAnAccountBucketCannotBeStatted)
 {
     // The opendir failure below this check synthesizes an unreadable-bucket record precisely so the

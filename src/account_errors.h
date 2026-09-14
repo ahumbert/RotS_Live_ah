@@ -21,7 +21,7 @@ static constexpr std::size_t MAX_RECORDED_ERRORS = 100;
 static constexpr std::size_t MAX_RECORDED_FIELD_LENGTH = 240;
 
 enum class Source {
-    Boot, // the boot walk could not read an account-native character file
+    Boot, // the boot walk could not read an account-native character file, or quarantined an account record
     Migration, // a legacy character would not convert into account storage
     Save, // a character save was refused rather than written
 };

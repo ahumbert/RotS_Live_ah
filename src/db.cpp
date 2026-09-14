@@ -685,8 +685,11 @@ namespace {
             sprintf(buf, "Failed to read account-native index source '%s': %s",
                 record.record_path.c_str(), record.failure_reason.c_str());
             log(buf);
-            account_index::quarantine(account::account_index_quarantine_key(record),
-                record.record_path, record.failure_reason);
+            const std::string filed_under = account::account_index_quarantine_key(record);
+            account_index::quarantine(filed_under, record.record_path, record.failure_reason);
+            // A quarantined record locks its owner out of the game, so it belongs in the list an
+            // immortal can ask about after boot, not only in `account index`.
+            account_errors::record(account_errors::Source::Boot, filed_under, std::string(), record.failure_reason);
             return;
         }
 
@@ -724,6 +727,9 @@ namespace {
                 // their record sits inert under the other name.
                 if (!declared_email.empty() && declared_email != filed_under)
                     account_index::quarantine(declared_email, record.record_path, buf);
+                // One record, however many addresses it reserves: record it once, under the address
+                // it is filed under. buf already names the address it declares.
+                account_errors::record(account_errors::Source::Boot, filed_under, std::string(), buf);
                 return;
             }
         } else {
@@ -736,7 +742,9 @@ namespace {
                 sprintf(buf, "Legacy flat account record '%s' has no usable email address.",
                     record.record_path.c_str());
                 log(buf);
-                account_index::quarantine(account::account_index_quarantine_key(record), record.record_path, buf);
+                const std::string filed_under = account::account_index_quarantine_key(record);
+                account_index::quarantine(filed_under, record.record_path, buf);
+                account_errors::record(account_errors::Source::Boot, filed_under, std::string(), buf);
                 return;
             }
         }
