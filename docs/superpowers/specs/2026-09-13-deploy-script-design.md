@@ -127,7 +127,10 @@ Each step checks its result; any failure stops the run, skips to step 9, and nam
 Before any remote command, the script asserts the port dir matches `^/rots/[a-z0-9-]+$`, and every
 remote command string is built with `shlex.quote`.
 
-3. **Pre-check.** Confirm `src`, `bin`, and `lib/text` exist under `/rots/<dir>`. List paths `<user>`
+3. **Pre-check.** Confirm `src`, `bin`, and `lib/text` exist under `/rots/<dir>`. Refuse the deploy
+   if `src`, `bin`, `lib/text`, or any symlink under them resolves outside `/rots/<dir>` (the tool
+   never touches a file outside the port's game dir; chmod skips symlinks and chown uses `-h`, so
+   neither follows a link, and `revert` makes the same check). List paths `<user>`
    cannot write: `find . ../bin ! -writable -print`, plus `../lib/text` itself and each help file
    that already exists there. If any, show them and first run `chmod u+w` on the ones `<user>` owns
    (no sudo, so no password prompt), then re-check. Only if something is still unwritable, run

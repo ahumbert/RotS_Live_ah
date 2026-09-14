@@ -422,6 +422,76 @@ class MissingDirsCommandTest(RemoteCommandTestCase):
         self.assertIn("/bin", result.stdout)
 
 
+class OutsideLinksCommandTest(RemoteCommandTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.outside = self.root.parent / "outside"
+        self.outside.mkdir()
+        (self.outside / "file").write_text("outside\n")
+        (self.outside / "dir").mkdir()
+
+    def check(self) -> subprocess.CompletedProcess:
+        return self.sh(deploy.outside_links_command(TEST_ENV))
+
+    def assert_refused_naming(self, link: Path) -> None:
+        result = self.check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("outside", result.stdout)
+        self.assertIn(str(link), result.stdout)
+
+    def test_passes_without_symlinks(self) -> None:
+        result = self.check()
+
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
+
+    def test_passes_with_a_symlink_that_stays_inside_the_port(self) -> None:
+        os.symlink("../lib/text/help_tbl", self.root / "src" / "help_link")
+
+        result = self.check()
+
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
+
+    def test_refuses_a_file_symlink_in_src_that_points_outside(self) -> None:
+        link = self.root / "src" / "outside_file"
+        os.symlink(self.outside / "file", link)
+
+        self.assert_refused_naming(link)
+
+    def test_refuses_a_directory_symlink_in_bin_that_points_outside(self) -> None:
+        link = self.root / "bin" / "outside_dir"
+        os.symlink(self.outside / "dir", link)
+
+        self.assert_refused_naming(link)
+
+    def test_refuses_a_help_file_symlinked_outside(self) -> None:
+        link = self.root / "lib" / "text" / "help_tbl"
+        link.unlink()
+        os.symlink(self.outside / "file", link)
+
+        self.assert_refused_naming(link)
+
+    def test_refuses_lib_text_itself_symlinked_outside(self) -> None:
+        text_dir = self.root / "lib" / "text"
+        (text_dir / "help_tbl").unlink()
+        text_dir.rmdir()
+        os.symlink(self.outside / "dir", text_dir)
+
+        self.assert_refused_naming(text_dir)
+
+    def test_refuses_a_dangling_symlink_that_points_outside(self) -> None:
+        link = self.root / "src" / "dangling"
+        os.symlink(self.outside / "missing", link)
+
+        self.assert_refused_naming(link)
+
+    def test_checks_inside_a_src_that_is_itself_a_symlink_within_the_port(self) -> None:
+        (self.root / "src").rename(self.root / "src-real")
+        os.symlink("src-real", self.root / "src")
+        os.symlink(self.outside / "file", self.root / "src-real" / "outside_file")
+
+        self.assert_refused_naming(self.root / "src" / "outside_file")
+
+
 class DeployMarkerCommandTest(RemoteCommandTestCase):
     def marker(self) -> Path:
         return self.root / "src" / deploy.DEPLOY_MARKER
@@ -475,13 +545,39 @@ class UnwritableCommandTest(RemoteCommandTestCase):
         self.assertIn(f"{self.root}/lib/text/help_tbl", output)
 
 
-class ChownCommandTest(unittest.TestCase):
-    def test_is_valid_sh_and_targets_the_ssh_user(self) -> None:
+OTHER_GROUPS = [group for group in os.getgroups() if group != os.getgid()]
+
+
+class ChownCommandTest(RemoteCommandTestCase):
+    def test_is_valid_sh_targets_the_ssh_user_and_never_dereferences_symlinks(self) -> None:
         command = deploy.chown_command(TEST_ENV, "someone", ["help_tbl"])
 
         self.assertEqual(subprocess.run(["sh", "-n", "-c", command]).returncode, 0)
-        self.assertIn("sudo chown -R someone /rots/zzz-forge-test/src /rots/zzz-forge-test/bin", command)
-        self.assertIn("sudo chown someone /rots/zzz-forge-test/lib/text", command)
+        self.assertIn("sudo chown -hR someone /rots/zzz-forge-test/src /rots/zzz-forge-test/bin", command)
+        self.assertIn("sudo chown -h someone /rots/zzz-forge-test/lib/text", command)
+        self.assertNotRegex(command, r"sudo chown (?!-h)")
+
+    @unittest.skipUnless(OTHER_GROUPS, "needs a second group to change files to without sudo")
+    def test_leaves_files_outside_the_port_alone_when_run_as_chgrp(self) -> None:
+        # chown needs sudo; chgrp takes the same -h/-R flags and symlink handling, so it stands in here.
+        import grp
+        outside = self.root.parent / "outside"
+        outside.mkdir()
+        victims = [outside / "via_src", outside / "via_help"]
+        for victim in victims:
+            victim.write_text("outside\n")
+        os.symlink(victims[0], self.root / "src" / "link_to_outside")
+        (self.root / "lib" / "text" / "help_tbl").unlink()
+        os.symlink(victims[1], self.root / "lib" / "text" / "help_tbl")
+        group = grp.getgrgid(OTHER_GROUPS[0]).gr_name
+        command = deploy.chown_command(TEST_ENV, "USER", ["help_tbl"]).replace("sudo chown", "chgrp")
+        command = command.replace(" USER ", f" {group} ")
+
+        result = self.sh(command)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for victim in victims:
+            self.assertEqual(victim.stat().st_gid, os.getgid(), victim)
 
 
 @unittest.skipIf(os.geteuid() == 0, "root can write everything")
@@ -503,6 +599,23 @@ class ChmodOwnedCommandTest(RemoteCommandTestCase):
         for path in (game, help_table, text_dir):
             self.assertTrue(os.access(path, os.W_OK), path)
         self.assertEqual(self.sh(deploy.unwritable_command(TEST_ENV, ["help_tbl"])).stdout, "")
+
+    def test_never_follows_symlinks_out_of_the_port(self) -> None:
+        outside = self.root.parent / "outside"
+        outside.mkdir()
+        victims = [outside / "via_src", outside / "via_help"]
+        for victim in victims:
+            victim.write_text("outside\n")
+            victim.chmod(0o444)
+            self.addCleanup(victim.chmod, 0o644)
+        os.symlink(victims[0], self.root / "src" / "link_to_outside")
+        (self.root / "lib" / "text" / "help_tbl").unlink()
+        os.symlink(victims[1], self.root / "lib" / "text" / "help_tbl")
+
+        self.assertEqual(self.sh(deploy.chmod_owned_command(TEST_ENV, ["help_tbl"])).returncode, 0)
+
+        for victim in victims:
+            self.assertEqual(victim.stat().st_mode & 0o777, 0o444, victim)
 
     def test_leaves_writable_files_alone(self) -> None:
         before = (self.root / "src" / "game.cpp").stat().st_mode
@@ -699,6 +812,18 @@ class RevertRemoteCommandTest(RemoteCommandTestCase):
         self.marker = self.root / "src" / deploy.DEPLOY_MARKER
         self.marker.write_text("")
         self.command = deploy.revert_remote_command(TEST_ENV)
+
+    def test_refuses_when_a_symlink_points_outside_the_port(self) -> None:
+        outside = self.root.parent / "outside"
+        outside.mkdir()
+        os.symlink(outside, self.root / "src" / "link_to_outside")
+
+        result = self.sh(self.command)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("outside", result.stdout)
+        self.assertEqual((self.root / "src" / "game.cpp").read_text(), "broken new source\n")
+        self.assertTrue(self.marker.exists())
 
     def test_restores_relinks_and_clears_the_marker(self) -> None:
         start = int(time.time())
@@ -932,6 +1057,8 @@ class FakeRunner:
                 labels.append(call[0])
             elif "find backup -mindepth" in call[1]:
                 labels.append("revert")
+            elif "readlink -m" in call[1]:
+                labels.append("links")
             elif call[1].startswith("touch ") and deploy.DEPLOY_MARKER in call[1]:
                 labels.append("mark")
             elif call[1].startswith("rm -f ") and deploy.DEPLOY_MARKER in call[1]:
@@ -975,8 +1102,8 @@ class DeployTest(unittest.TestCase):
         status = self.run_deploy("test")
 
         self.assertEqual(status, 0)
-        self.assertEqual(self.runner.kinds(), ["connect", "dirs", "unfinished", "unwritable", "backup", "mark",
-                                               "sftp", "build", "finish", "close"])
+        self.assertEqual(self.runner.kinds(), ["connect", "dirs", "links", "unfinished", "unwritable", "backup",
+                                               "mark", "sftp", "build", "finish", "close"])
         self.assertEqual(self.checkout.tags, [("test", "abc1234def5678", ["help", "help_tbl"], self.DAY)])
         self.assertEqual(self.checkout.prepared, [False])
         self.assertIn("Tag: test-2026-09-13.", self.text())
@@ -985,14 +1112,14 @@ class DeployTest(unittest.TestCase):
     def test_4k_edits_the_source_after_upload_and_before_build(self) -> None:
         self.assertEqual(self.run_deploy("4k"), 0)
 
-        self.assertEqual(self.runner.kinds(), ["connect", "dirs", "unfinished", "unwritable", "backup", "mark",
-                                               "sftp", "edit", "build", "finish", "close"])
+        self.assertEqual(self.runner.kinds(), ["connect", "dirs", "links", "unfinished", "unwritable", "backup",
+                                               "mark", "sftp", "edit", "build", "finish", "close"])
         self.assertIn("USE_BIG_BROTHER", self.text())
 
     def test_coders_skips_the_backup(self) -> None:
         self.assertEqual(self.run_deploy("coders"), 0)
 
-        self.assertEqual(self.runner.kinds(), ["connect", "dirs", "unwritable", "sftp", "build", "close"])
+        self.assertEqual(self.runner.kinds(), ["connect", "dirs", "links", "unwritable", "sftp", "build", "close"])
 
     def test_test_target_is_not_tagged(self) -> None:
         self.assertEqual(self.run_deploy("zzz-forge-test"), 0)
@@ -1017,12 +1144,22 @@ class DeployTest(unittest.TestCase):
         self.assertIn("Nothing was uploaded", self.text())
         self.assertEqual(self.checkout.tags, [])
 
+    def test_symlink_pointing_outside_the_port_stops_before_anything_changes(self) -> None:
+        runner = FakeRunner(fail_when=lambda call: call[0] == "remote" and "readlink -m" in call[1])
+
+        self.assertEqual(self.run_deploy("test", runner=runner), 1)
+
+        self.assertEqual(self.runner.kinds(), ["connect", "dirs", "links", "close"])
+        self.assertIn("FAILED at step 3", self.text())
+        self.assertIn("Nothing was uploaded", self.text())
+        self.assertEqual(self.checkout.tags, [])
+
     def test_unfinished_deploy_marker_stops_before_backup(self) -> None:
         runner = FakeRunner(fail_when=lambda call: call[0] == "remote" and "did not finish" in call[1])
 
         self.assertEqual(self.run_deploy("test", runner=runner), 1)
 
-        self.assertEqual(self.runner.kinds(), ["connect", "dirs", "unfinished", "close"])
+        self.assertEqual(self.runner.kinds(), ["connect", "dirs", "links", "unfinished", "close"])
         self.assertIn("FAILED at step 3", self.text())
         self.assertEqual(self.checkout.tags, [])
 
@@ -1031,8 +1168,8 @@ class DeployTest(unittest.TestCase):
 
         self.assertEqual(self.run_deploy("test", runner=runner), 0)
 
-        self.assertEqual(self.runner.kinds()[:7],
-                         ["connect", "dirs", "unfinished", "unwritable", "chmod", "unwritable", "backup"])
+        self.assertEqual(self.runner.kinds()[:8],
+                         ["connect", "dirs", "links", "unfinished", "unwritable", "chmod", "unwritable", "backup"])
         self.assertNotIn("chown", self.runner.kinds())
         self.assertNotIn("sudo may ask for a password", self.text())
         self.assertIn("Fixed with chmod u+w; no sudo needed.", self.text())
@@ -1046,9 +1183,9 @@ class DeployTest(unittest.TestCase):
 
         self.assertEqual(self.run_deploy("test", runner=runner), 0)
 
-        self.assertEqual(self.runner.kinds()[:10],
-                         ["connect", "dirs", "unfinished", "unwritable", "chmod", "unwritable", "chown", "chmod",
-                          "unwritable", "backup"])
+        self.assertEqual(self.runner.kinds()[:11],
+                         ["connect", "dirs", "links", "unfinished", "unwritable", "chmod", "unwritable", "chown",
+                          "chmod", "unwritable", "backup"])
         chown = [call for call in self.runner.calls if call[0] == "remote" and "sudo chown" in call[1]][0]
         self.assertTrue(chown[2])
         self.assertIn("sudo may ask for a password", self.text())
@@ -1119,6 +1256,7 @@ class DeployTest(unittest.TestCase):
                 self.assertIn('put "help_tbl"', self.text())
                 self.assertIn("git pull --ff-only", self.text())
                 self.assertIn("chmod u+w", self.text())
+                self.assertIn("readlink -m", self.text())
                 env = deploy.ENVS[name]
                 shell = deploy.SshRunner(SERVER, Path(deploy.SOCKET_PARENT) / "rots-deploy-XXXXXX")
 

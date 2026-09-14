@@ -321,6 +321,29 @@ def missing_dirs_command(env: Env) -> str:
     return f'for d in {dirs}; do [ -d "$d" ] || {{ echo "missing directory: $d"; exit 1; }}; done'
 
 
+def outside_links_command(env: Env) -> str:
+    """Exits 1, listing them, when src, bin, lib/text, or a symlink under them resolves outside the port dir.
+
+    Nothing outside the port's game dir may ever be modified, and chmod, chown, sftp and cp would all act
+    through such a link.
+    """
+    base = port_dir(env)
+    paths = " ".join(q(f"{base}/{sub}") for sub in ("src", "bin", HELP_DIR))
+    message = q(f"refusing to continue: these symlinks point outside {base}, "
+                "and nothing outside the game dir may be touched:")
+    return (
+        f"base=$(readlink -m {q(base)}); "
+        "links=$( { "
+        f'for p in {paths}; do [ ! -L "$p" ] || printf \'%s\\n\' "$p"; done; '
+        f"find -H {paths} -mindepth 1 -type l 2>/dev/null; "
+        "} | while IFS= read -r l; do "
+        't=$(readlink -m "$l"); '
+        'case "$t" in "$base"|"$base"/*) ;; *) printf \'%s -> %s\\n\' "$l" "$t" ;; esac; '
+        "done ); "
+        f'[ -z "$links" ] || {{ echo {message}; printf \'%s\\n\' "$links"; exit 1; }}'
+    )
+
+
 def unfinished_deploy_command(env: Env, server: Server) -> str:
     """Refuses to continue when the previous deploy to this env did not finish."""
     base = port_dir(env)
@@ -354,9 +377,10 @@ def unwritable_command(env: Env, help_names: Sequence[str]) -> str:
 def chown_command(env: Env, user: str, help_names: Sequence[str]) -> str:
     base = port_dir(env)
     return (
-        f"sudo chown -R {q(user)} {q(base + '/src')} {q(base + '/bin')} && "
-        f"sudo chown {q(user)} {q(base + '/' + HELP_DIR)} && "
-        f'for f in {_help_paths(env, help_names)}; do [ ! -e "$f" ] || sudo chown {q(user)} "$f" || exit 1; done'
+        # -h: change a symlink itself, never the file it points to.
+        f"sudo chown -hR {q(user)} {q(base + '/src')} {q(base + '/bin')} && "
+        f"sudo chown -h {q(user)} {q(base + '/' + HELP_DIR)} && "
+        f'for f in {_help_paths(env, help_names)}; do [ ! -e "$f" ] || sudo chown -h {q(user)} "$f" || exit 1; done'
     )
 
 
@@ -365,9 +389,10 @@ def chmod_owned_command(env: Env, help_names: Sequence[str]) -> str:
     base = port_dir(env)
     return (
         "me=$(id -un); "
-        f'find {q(base + "/src")} {q(base + "/bin")} -user "$me" ! -writable -exec chmod u+w {{}} + 2>/dev/null; '
+        # chmod on a symlink changes the file it points to, so symlinks are always skipped.
+        f'find {q(base + "/src")} {q(base + "/bin")} -user "$me" ! -type l ! -writable -exec chmod u+w {{}} + 2>/dev/null; '
         f"for f in {q(base + '/' + HELP_DIR)} {_help_paths(env, help_names)}; do "
-        '[ ! -e "$f" ] || [ -w "$f" ] || [ -z "$(find "$f" -maxdepth 0 -user "$me")" ] || chmod u+w "$f"; '
+        '[ -L "$f" ] || [ ! -e "$f" ] || [ -w "$f" ] || [ -z "$(find "$f" -maxdepth 0 -user "$me")" ] || chmod u+w "$f"; '
         "done; true"
     )
 
@@ -450,6 +475,7 @@ def revert_remote_command(env: Env) -> str:
     missing = q(f"no backup at {base}/src/backup; nothing to revert to")
     stale = q("the revert finished but ../bin/ageland was not relinked")
     return (
+        f"{outside_links_command(env)}; "
         f"cd {q(base + '/src')} && {{ [ -d backup ] || {{ echo {missing}; exit 1; }}; }} && start=$(date +%s) && "
         f"{revert_command(env)} && "
         '{ [ -f ../bin/ageland ] && [ "$(stat -c %Y ../bin/ageland)" -ge "$start" ] || '
@@ -593,7 +619,7 @@ def dry_run_plan(env: Env, server: Server, repo: Path, help_names: Sequence[str]
               f"  would run 'git pull --ff-only' when the checkout is on {DEPLOY_BRANCH!r}; "
               "the commit shown above is the checkout before that pull."]
     lines += [f"== 2. {STEP_TITLES[2]}", "  " + shlex.join(shell.connect_args())]
-    step3 = [f"== 3. {STEP_TITLES[3]}", ssh(missing_dirs_command(env))]
+    step3 = [f"== 3. {STEP_TITLES[3]}", ssh(missing_dirs_command(env)), ssh(outside_links_command(env))]
     if env.backup:
         step3.append(ssh(unfinished_deploy_command(env, server)))
     step3 += [ssh(unwritable_command(env, help_names)), "  only if something is unwritable (no sudo):",
@@ -655,6 +681,7 @@ def deploy(env: Env, server: Server, checkout, runner, *, dry_run: bool, color: 
 
         begin(3)
         runner.remote(missing_dirs_command(env))
+        runner.remote(outside_links_command(env))
         if env.backup:
             runner.remote(unfinished_deploy_command(env, server))
         unwritable = _lines(runner.remote(unwritable_command(env, help_names), capture=True))
