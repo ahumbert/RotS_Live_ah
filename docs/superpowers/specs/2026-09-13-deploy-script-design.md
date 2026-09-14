@@ -85,7 +85,12 @@ before the first scripted deploy.
 ```
 scripts/deploy.py deploy <env> <user>@<host> <ssh-port>
 scripts/deploy.py deploy <env> <user>@<host> <ssh-port> --dry-run
+scripts/deploy.py revert <env> <user>@<host> <ssh-port>
 ```
+
+`revert` puts an env with a backup back to its `src/backup`: it asks for the ssh password once,
+restores `src/` and the help files, forces a relink, clears `src/DEPLOY_IN_PROGRESS`, and checks
+that `bin/ageland` was rebuilt. It refuses coders, which keeps no backup.
 
 `<user>@<host>` and `<ssh-port>` are required positional arguments with no defaults, so the repo
 never records the login account or the server's ssh port. A missing or malformed value (a login
@@ -176,8 +181,8 @@ remote command string is built with `shlex.quote`.
 9. **Close and report.** Always close the master connection (`ssh -S <socket> -O exit`) and delete the
    temp directory, including after a failure or Ctrl-C. Print either success with the tag name, or
    the failed step plus a revert hint:
-   - envs with a backup: `cd /rots/<dir>/src && cp -rp backup/* . && make all -j6`, and
-     `cp -p backup/lib-text/* ../lib/text/`
+   - envs with a backup: `scripts/deploy.py revert <env> <user>@<host> <ssh-port>`, with the
+     equivalent server-side command printed underneath as a fallback.
    - coders: redeploy the previous commit.
 
 ## Code shape

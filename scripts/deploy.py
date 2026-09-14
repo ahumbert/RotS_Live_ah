@@ -2,6 +2,7 @@
 """Deploy RotS source and help files to one port on the game server.
 
     scripts/deploy.py deploy <env> <user>@<host> <ssh-port> [--dry-run]
+    scripts/deploy.py revert <env> <user>@<host> <ssh-port>
 
 The login and ssh port are arguments with no defaults, so this file never records them.
 Design: docs/superpowers/specs/2026-09-13-deploy-script-design.md
@@ -123,9 +124,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="deploy.py", description="Deploy RotS to a port on the game server.")
     commands = parser.add_subparsers(dest="command", required=True)
     deploy_parser = commands.add_parser("deploy", help="upload, build, and tag one env")
-    deploy_parser.add_argument("env", choices=list(ENVS))
-    deploy_parser.add_argument("login", type=parse_login, metavar="user@host")
-    deploy_parser.add_argument("port", type=parse_port, metavar="ssh-port")
+    revert_parser = commands.add_parser("revert", help="restore one env from its src/backup and relink")
+    for command_parser in (deploy_parser, revert_parser):
+        command_parser.add_argument("env", choices=list(ENVS))
+        command_parser.add_argument("login", type=parse_login, metavar="user@host")
+        command_parser.add_argument("port", type=parse_port, metavar="ssh-port")
     deploy_parser.add_argument("--dry-run", action="store_true",
         help="run the local checks and print every step; change nothing")
     return parser
@@ -441,6 +444,19 @@ def build_command(env: Env) -> str:
     )
 
 
+def revert_remote_command(env: Env) -> str:
+    """The `revert` subcommand's remote step: refuse without a backup, revert, then check the relink."""
+    base = port_dir(env)
+    missing = q(f"no backup at {base}/src/backup; nothing to revert to")
+    stale = q("the revert finished but ../bin/ageland was not relinked")
+    return (
+        f"cd {q(base + '/src')} && {{ [ -d backup ] || {{ echo {missing}; exit 1; }}; }} && start=$(date +%s) && "
+        f"{revert_command(env)} && "
+        '{ [ -f ../bin/ageland ] && [ "$(stat -c %Y ../bin/ageland)" -ge "$start" ] || '
+        f"{{ echo {stale}; exit 1; }}; }}"
+    )
+
+
 def revert_command(env: Env) -> str:
     base = port_dir(env)
     text_dir = q(f"{base}/{HELP_DIR}")
@@ -542,7 +558,7 @@ def banner(env: Env, server: Server, sha: str, subject: str, help_names: Sequenc
     ])
 
 
-def failure_report(env: Env, step: int, detail: str, color: bool) -> str:
+def failure_report(env: Env, step: int, detail: str, color: bool, server: Optional[Server] = None) -> str:
     lines = [paint(f"FAILED at step {step} ({STEP_TITLES[step]}): {detail}", BOLD_RED, color)]
     if step <= 4:
         # Step 3's sudo chown may have changed ownership, so "unchanged" only promises contents.
@@ -550,7 +566,11 @@ def failure_report(env: Env, step: int, detail: str, color: bool) -> str:
     elif step == 8:
         lines.append("The upload and build finished; only the local tag failed.")
     elif env.backup:
-        lines.append(f"To revert: {revert_command(env)}")
+        if server is not None:
+            lines.append(f"To revert: scripts/deploy.py revert {env.name} {server.login} {server.port}")
+            lines.append(f"  or on the server: {revert_command(env)}")
+        else:
+            lines.append(f"To revert: {revert_command(env)}")
         lines.append(f"The next deploy will refuse to run until this one is reverted, because "
                       f"{port_dir(env)}/src/{DEPLOY_MARKER} is present.")
     else:
@@ -681,19 +701,43 @@ def deploy(env: Env, server: Server, checkout, runner, *, dry_run: bool, color: 
         else:
             out(f"{env.name} is a test target; no tag.")
     except DeployError as error:
-        out(failure_report(env, step, str(error), color))
+        out(failure_report(env, step, str(error), color, server))
         return 1
     except KeyboardInterrupt:
-        out(failure_report(env, step, "interrupted", color))
+        out(failure_report(env, step, "interrupted", color, server))
         return 130
     except Exception as error:
-        out(failure_report(env, step, f"unexpected error: {error!r}", color))
+        out(failure_report(env, step, f"unexpected error: {error!r}", color, server))
         raise
     finally:
         runner.close()
 
     out(paint(f"Deployed {sha[:7]} to {env.name}.", GREEN, color)
         + (f" Tag: {tag}." if tag else "") + " Restart the port to run the new build.")
+    return 0
+
+
+def revert(env: Env, server: Server, runner, *, color: bool = False,
+           out: Callable[[str], None] = lambda line: print(line, flush=True)) -> int:
+    """Put an env back to its src/backup (the state before its last deploy) and relink."""
+    if not env.backup:
+        out(paint(f"{env.name} keeps no backup; to revert, deploy the previous commit.", BOLD_RED, color))
+        return 1
+    out(f"Reverting: {paint(env.name, env.color, color)}  ->  "
+        f"{server.login}:/rots/{paint(env.dir_name, env.color, color)}")
+    try:
+        runner.connect()
+        runner.remote(revert_remote_command(env))
+    except DeployError as error:
+        out(paint(f"FAILED revert: {error}", BOLD_RED, color))
+        return 1
+    except KeyboardInterrupt:
+        out(paint("FAILED revert: interrupted; the remote make may still be running.", BOLD_RED, color))
+        return 130
+    finally:
+        runner.close()
+    out(paint(f"Reverted {env.name} to src/backup and relinked bin/ageland. Restart the port to run it.",
+              GREEN, color))
     return 0
 
 
@@ -704,6 +748,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
     with tempfile.TemporaryDirectory(prefix="rots-deploy-", dir=SOCKET_PARENT) as work_dir:
         runner = SshRunner(server, Path(work_dir))
+        if args.command == "revert":
+            return revert(ENVS[args.env], server, runner, color=color)
         return deploy(ENVS[args.env], server, Checkout(REPO_ROOT), runner, dry_run=args.dry_run, color=color)
 
 

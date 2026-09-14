@@ -111,6 +111,19 @@ class ArgumentsTest(unittest.TestCase):
         for bad in ("ssh", "0", "70000", "-1", "22.0"):
             self.assert_usage_error("deploy", "live", "someone@example.org", bad)
 
+    def test_revert_takes_env_login_and_port(self) -> None:
+        args = self.parse("revert", "zzz-forge-test", "someone@example.org", "2222")
+
+        self.assertEqual((args.command, args.env, args.login, args.port),
+                         ("revert", "zzz-forge-test", ("someone", "example.org"), 2222))
+
+    def test_revert_needs_every_argument_and_a_known_env(self) -> None:
+        self.assert_usage_error("revert")
+        self.assert_usage_error("revert", "live")
+        self.assert_usage_error("revert", "live", "someone@example.org")
+        self.assert_usage_error("revert", "prod", "someone@example.org", "2222")
+        self.assert_usage_error("revert", "live", "-oProxyCommand=x@example.org", "2222")
+
 
 # ---------------------------------------------------------------------------------------------
 # Help files
@@ -668,6 +681,61 @@ class BuildCommandTest(RemoteCommandTestCase):
         self.assertNotEqual(self.sh(deploy.build_command(TEST_ENV)).returncode, 0)
 
 
+class RevertRemoteCommandTest(RemoteCommandTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        (self.root / "src" / "Makefile").write_text("all: ../bin/ageland\n../bin/ageland: game.o\n\ttouch ../bin/ageland\n")
+        self.assertEqual(self.sh(deploy.backup_command(TEST_ENV, ["help_tbl"])).returncode, 0)
+        self.backup = self.root / "src" / "backup"
+        # The backed-up object is older than the running binary, so only a forced relink rebuilds it.
+        os.utime(self.backup / "game.o", (time.time() - 3600, time.time() - 3600))
+        self.binary = self.root / "bin" / "ageland"
+        self.binary.write_text("binary from the bad deploy")
+        os.utime(self.binary, (time.time() - 100, time.time() - 100))
+        (self.root / "src" / "game.cpp").write_text("broken new source\n")
+        (self.root / "lib" / "text" / "help_tbl").write_text("broken new help\n")
+        self.marker = self.root / "src" / deploy.DEPLOY_MARKER
+        self.marker.write_text("")
+        self.command = deploy.revert_remote_command(TEST_ENV)
+
+    def test_restores_relinks_and_clears_the_marker(self) -> None:
+        start = int(time.time())
+
+        result = self.sh(self.command)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.root / "src" / "game.cpp").read_text(), "old source\n")
+        self.assertEqual((self.root / "lib" / "text" / "help_tbl").read_text(), "old help\n#~\n")
+        self.assertGreaterEqual(int(self.binary.stat().st_mtime), start)
+        self.assertFalse(self.marker.exists())
+        self.assertFalse((self.root / "src" / "lib-text").exists())
+
+    def test_refuses_when_there_is_no_backup(self) -> None:
+        subprocess.run(["rm", "-rf", str(self.backup)], check=True)
+
+        result = self.sh(self.command)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no backup", result.stdout)
+        self.assertEqual((self.root / "src" / "game.cpp").read_text(), "broken new source\n")
+        self.assertTrue(self.marker.exists())
+
+    def test_failed_make_keeps_the_marker(self) -> None:
+        (self.backup / "Makefile").write_text("all:\n\t@false\n")
+
+        self.assertNotEqual(self.sh(self.command).returncode, 0)
+
+        self.assertTrue(self.marker.exists())
+
+    def test_reports_a_binary_that_was_not_relinked(self) -> None:
+        (self.backup / "Makefile").write_text("all:\n\t@true\n")
+
+        result = self.sh(self.command)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not relinked", result.stdout)
+
+
 class SftpBatchTest(unittest.TestCase):
     def test_uploads_src_then_each_help_file(self) -> None:
         batch = deploy.sftp_batch(TEST_ENV, Path("/home/me/RotS"), ["help", "help_tbl"])
@@ -860,6 +928,8 @@ class FakeRunner:
         for call in self.calls:
             if call[0] != "remote":
                 labels.append(call[0])
+            elif "find backup -mindepth" in call[1]:
+                labels.append("revert")
             elif call[1].startswith("touch ") and deploy.DEPLOY_MARKER in call[1]:
                 labels.append("mark")
             elif call[1].startswith("rm -f ") and deploy.DEPLOY_MARKER in call[1]:
@@ -997,6 +1067,7 @@ class DeployTest(unittest.TestCase):
 
         self.assertEqual(self.runner.kinds()[-1], "close")
         self.assertIn("FAILED at step 5", self.text())
+        self.assertIn("To revert: scripts/deploy.py revert test someone@example.org 2222", self.text())
         self.assertIn(deploy.revert_command(deploy.ENVS["test"]), self.text())
         self.assertEqual(self.checkout.tags, [])
 
@@ -1078,6 +1149,58 @@ class MainTest(unittest.TestCase):
         self.assertEqual(checkout.repo, deploy.REPO_ROOT)
         self.assertTrue(str(runner.socket).startswith("/tmp/rots-deploy-"))
         self.assertTrue(run.call_args.kwargs["dry_run"])
+
+    def test_wires_revert_arguments_into_revert(self) -> None:
+        with mock.patch.object(deploy, "revert", return_value=0) as run, \
+                mock.patch.object(deploy, "deploy") as not_deploy:
+            self.assertEqual(deploy.main(["revert", "zzz-forge-test", "someone@example.org", "2222"]), 0)
+
+        env, server, runner = run.call_args.args
+        self.assertEqual(env, deploy.ENVS["zzz-forge-test"])
+        self.assertEqual(server, SERVER)
+        self.assertTrue(str(runner.socket).startswith("/tmp/rots-deploy-"))
+        not_deploy.assert_not_called()
+
+
+class RevertTest(unittest.TestCase):
+    def run_revert(self, env_name, runner=None):
+        self.runner = runner or FakeRunner()
+        self.output = []
+        return deploy.revert(deploy.ENVS[env_name], SERVER, self.runner, out=self.output.append)
+
+    def text(self):
+        return "\n".join(self.output)
+
+    def test_connects_runs_the_revert_and_closes(self) -> None:
+        self.assertEqual(self.run_revert("test"), 0)
+
+        self.assertEqual(self.runner.kinds(), ["connect", "revert", "close"])
+        self.assertEqual(self.runner.calls[1][1], deploy.revert_remote_command(deploy.ENVS["test"]))
+        self.assertIn("someone@example.org:/rots/dev-building4802", self.text())
+        self.assertIn("Reverted test", self.text())
+
+    def test_coders_has_no_backup_and_never_connects(self) -> None:
+        self.assertEqual(self.run_revert("coders"), 1)
+
+        self.assertEqual(self.runner.calls, [])
+        self.assertIn("keeps no backup", self.text())
+
+    def test_remote_failure_is_reported_and_closes(self) -> None:
+        runner = FakeRunner(fail_when=lambda call: call[0] == "remote")
+
+        self.assertEqual(self.run_revert("test", runner=runner), 1)
+
+        self.assertEqual(self.runner.kinds(), ["connect", "revert", "close"])
+        self.assertIn("FAILED revert: boom", self.text())
+
+    def test_interrupt_closes_the_connection(self) -> None:
+        runner = FakeRunner()
+        runner.connect = mock.Mock(side_effect=KeyboardInterrupt)
+
+        self.assertEqual(self.run_revert("test", runner=runner), 130)
+
+        self.assertEqual(self.runner.kinds(), ["close"])
+        self.assertIn("interrupted", self.text())
 
 
 if __name__ == "__main__":

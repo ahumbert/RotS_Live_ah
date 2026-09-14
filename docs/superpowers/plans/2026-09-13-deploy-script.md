@@ -1956,8 +1956,7 @@ throwaway commit (`git reset --hard HEAD~1` on the feature branch — confirm `g
 - [ ] **Step 7: Revert drill**
 
 Deploy `zzz-forge-test`. On a throwaway local commit, change a source file and a help file, then
-deploy `zzz-forge-test` again. Run the revert command the tool would print on failure (or the one
-from `deploy.revert_command`) on the server.
+deploy `zzz-forge-test` again. Run `scripts/deploy.py revert zzz-forge-test <user>@<host> <ssh-port>`.
 Expected: `bin/ageland` was relinked (its mtime changed), the source and help files are back to the
 previous deploy's contents, and `src/DEPLOY_IN_PROGRESS` is gone afterward. Then drop the throwaway
 commit.
@@ -1967,7 +1966,7 @@ commit.
 Run `deploy zzz-forge-test` and press Ctrl-C during step 5 or step 7.
 Expected: the failure report is shown, including the `src/DEPLOY_IN_PROGRESS` warning (and, if
 interrupted at step 7, the "remote make may still be running" line). Run `deploy zzz-forge-test`
-again and confirm it stops at step 3 on the marker. Run the printed revert command, then run
+again and confirm it stops at step 3 on the marker. Run `scripts/deploy.py revert zzz-forge-test ...`, then run
 `deploy zzz-forge-test` once more and confirm it proceeds normally.
 
 - [ ] **Step 9: Report**
