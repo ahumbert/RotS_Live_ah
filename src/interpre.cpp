@@ -4898,6 +4898,24 @@ void introduce_char(struct descriptor_data* d)
     if (account_backed_character) {
         account::AccountData account_data;
         std::string error_message;
+        // A legacy plrobjs/<name>.obj or .exploits file can outlive its character, and the first
+        // login reads the legacy object file before the account-native one (Crash_load). Selection
+        // clears these for an existing character; a new one enters the game straight from here, so
+        // clear them now. Nothing can still own them: the checks above refused a name that is linked
+        // to an account or belongs to a character that still exists.
+        if (!account::clear_account_character_runtime_support_files(kAccountStorageRoot, GET_NAME(d->character), &error_message)) {
+            SET_BIT(PLR_FLAGS(d->character), PLR_DELETED);
+            if (d->pos >= 0 && d->pos <= top_of_p_table) {
+                player_table[d->pos].flags |= PLR_DELETED;
+                player_table[d->pos].ch_file[0] = '\0';
+            }
+            SEND_TO_Q("Old files for that name could not be cleared, so the new character was rolled back. Please reconnect and try again.\n\r", d);
+            vmudlog(NRM, "Rolled back new character %s for account %s: could not clear leftover legacy files: %s",
+                GET_NAME(d->character), d->account_name, error_message.c_str());
+            STATE(d) = CON_CLOSE;
+            return;
+        }
+
         char_to_store(d->character, &stored_character);
         const int initial_load_room = d->character->specials2.load_room;
         stored_character.specials2.load_room = initial_load_room;
