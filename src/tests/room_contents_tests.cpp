@@ -9,6 +9,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -17,6 +18,8 @@ extern struct room_data world;
 extern int top_of_world;
 extern struct descriptor_data* descriptor_list;
 void clear_object(struct obj_data* obj);
+void clear_char(struct char_data* ch, int mode);
+void list_obj_to_char(struct obj_data* list, struct char_data* ch, int mode, bool show);
 
 namespace {
 
@@ -149,6 +152,89 @@ TEST(RoomContents, AFloorReportsReachingAThousandObjectsOnlyOnce)
     EXPECT_EQ(FloorFixture::listed(), 1002u);
     EXPECT_EQ(count_occurrences(output, "obj_to_room:"), 1u) << output;
     EXPECT_NE(output.find("reached 1000 objects"), std::string::npos) << output;
+}
+
+// A player standing on room 0, with a descriptor whose output the test can read. Floors of more than
+// about 300 objects used to fill the player's 16 KB output buffer, so everything sent after the objects
+// in a look -- the people in the room -- was dropped.
+class FloorViewer {
+public:
+    FloorViewer()
+    {
+        m_saved_light = world[0].light;
+        world[0].light = 1;
+
+        m_descriptor.output = m_descriptor.small_outbuf;
+        m_descriptor.small_outbuf[0] = '\0';
+        m_descriptor.bufptr = 0;
+        m_descriptor.bufspace = SMALL_BUFSIZE - 1;
+        m_descriptor.connected = CON_PLYNG;
+
+        clear_char(&m_viewer, MOB_VOID);
+        m_viewer.player.name = strdup("Looker");
+        m_viewer.player.level = 10;
+        m_viewer.in_room = 0;
+        m_viewer.desc = &m_descriptor;
+        m_descriptor.character = &m_viewer;
+
+        static char description[] = "A rusty longsword lies here.";
+        for (obj_data* object = world[0].contents; object; object = object->next_content)
+            object->description = description;
+    }
+
+    ~FloorViewer()
+    {
+        if (m_descriptor.large_outbuf) {
+            free(m_descriptor.large_outbuf->text);
+            free(m_descriptor.large_outbuf);
+        }
+        free(m_viewer.player.name);
+        world[0].light = m_saved_light;
+    }
+
+    std::string look_at_floor()
+    {
+        list_obj_to_char(world[0].contents, &m_viewer, 0, false);
+        return m_descriptor.output;
+    }
+
+private:
+    descriptor_data m_descriptor {};
+    char_data m_viewer {};
+    int m_saved_light = 0;
+};
+
+TEST(RoomContents, ALookAtACrowdedFloorListsAHundredObjectsAndCountsTheRest)
+{
+    FloorFixture fixture(150);
+    FloorViewer viewer;
+
+    const std::string output = viewer.look_at_floor();
+
+    EXPECT_EQ(count_occurrences(output, "A rusty longsword lies here."), 100u);
+    EXPECT_NE(output.find("...and 50 more items are lying here.\n\r"), std::string::npos) << output;
+}
+
+TEST(RoomContents, ALookAtAFloorOfAHundredListsEveryObject)
+{
+    FloorFixture fixture(100);
+    FloorViewer viewer;
+
+    const std::string output = viewer.look_at_floor();
+
+    EXPECT_EQ(count_occurrences(output, "A rusty longsword lies here."), 100u);
+    EXPECT_EQ(output.find("more item"), std::string::npos) << output;
+}
+
+TEST(RoomContents, ALookAtAFloorOfAHundredAndOneCountsTheLastItem)
+{
+    FloorFixture fixture(101);
+    FloorViewer viewer;
+
+    const std::string output = viewer.look_at_floor();
+
+    EXPECT_EQ(count_occurrences(output, "A rusty longsword lies here."), 100u);
+    EXPECT_NE(output.find("...and 1 more item is lying here.\n\r"), std::string::npos) << output;
 }
 
 } // namespace
