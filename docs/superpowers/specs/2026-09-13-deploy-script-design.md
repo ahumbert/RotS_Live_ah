@@ -33,7 +33,6 @@ and help-file upload.
 - *Deleting remote files.* A help file removed from the repo is not removed from the server.
 - *ssh keys.* There are none. The one password prompt per run is intentional and serves as the
   confirmation step — no separate "are you sure" prompt.
-- *Pushing tags.* Deploy tags stay local, as they do today.
 - *Third-party packages.* Standard library only (Python 3.10), driving the system `ssh`/`sftp`.
 
 ## Environments
@@ -105,7 +104,7 @@ Deployers keep their full command in their own notes.
 
 `--dry-run` runs the local checks (step 1's tree checks and the help format check) and prints every
 remaining step with its exact command. It runs nothing on the server and nothing that changes the
-local checkout (no pull, no tag).
+local checkout (no pull, no tag fetch, tag, or push).
 
 The script deploys the checkout it lives in: `src/` and `lib/text/` next to the `scripts/` directory
 holding it. In normal use that is `RotS_Live_DEPLOY`.
@@ -179,8 +178,14 @@ remote command string is built with `shlex.quote`.
 
 **Local**
 
-8. **Tag** (skipped for envs without a tag prefix). Annotated tag on the deployed SHA named
-   `<prefix>YYYY-MM-DD`, or `-2`, `-3`, … if that name exists. Not pushed. The message names the env,
+8. **Tag** (skipped for envs without a tag prefix). First fetch the env's tags from the main repo
+   (`git fetch --no-tags git@github.com:returnoftheshadow/RotS_Live.git 'refs/tags/<prefix>*:refs/tags/<prefix>*'`),
+   so a name another deployer already pushed is not reused. Then create an annotated tag on the
+   deployed SHA named `<prefix>YYYY-MM-DD`, or `-2`, `-3`, … if that name exists, and push it
+   (`git push git@github.com:returnoftheshadow/RotS_Live.git refs/tags/<name>`) so every deployer
+   and dev can see what went out. The main repo is named by URL, not by remote, because remote names
+   differ between checkouts. A failed fetch or push only prints a warning (a failed push also prints
+   the command to push by hand): the deploy is already built, and the restart still runs. The message names the env,
    the remote dir, the SHA, and the help changes: the help files that differ between the env's
    previous tag (latest existing `<prefix>*` tag) and this commit
    (`git diff --name-only <prev> <sha> -- <help files>`), or `none`, or `first tagged deploy` when
