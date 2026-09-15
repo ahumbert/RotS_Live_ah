@@ -736,6 +736,11 @@ class SourceEditCommandTest(RemoteCommandTestCase):
 
 
 class BuildCommandTest(RemoteCommandTestCase):
+    def test_build_and_revert_run_make_with_two_jobs(self) -> None:
+        for command in (deploy.build_command(TEST_ENV), deploy.revert_command(TEST_ENV)):
+            self.assertIn("make all -j2", command)
+            self.assertNotIn("-j6", command)
+
     def test_passes_when_make_rebuilds_the_binary(self) -> None:
         (self.root / "src" / "Makefile").write_text("clean:\n\trm -f *.o\nall:\n\ttouch ../bin/ageland\n")
 

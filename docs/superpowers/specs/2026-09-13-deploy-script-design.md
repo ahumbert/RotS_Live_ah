@@ -168,7 +168,7 @@ remote command string is built with `shlex.quote`.
    `^#define USE_BIG_BROTHER 1$` in `big_brother.h`; replace it with `#define USE_BIG_BROTHER 0` via
    `sed -i`; then require exactly one `^#define USE_BIG_BROTHER 0$` line and no `... 1` line. The
    local checkout is never edited.
-7. **Build.** Record the server time, then `make clean`, then `make all -j6`, streaming output. Then
+7. **Build.** Record the server time, then `make clean`, then `make all -j2`, streaming output. Then
    require `../bin/ageland` to exist with a modification time at or after the recorded time.
 
 **Local**

@@ -451,7 +451,7 @@ def source_edit_command(env: Env, edit: SourceEdit) -> str:
 
 def build_command(env: Env) -> str:
     return (
-        f"cd {q(port_dir(env) + '/src')} && start=$(date +%s) && make clean && make all -j6 && "
+        f"cd {q(port_dir(env) + '/src')} && start=$(date +%s) && make clean && make all -j2 && "
         '{ [ -f ../bin/ageland ] && [ "$(stat -c %Y ../bin/ageland)" -ge "$start" ] || '
         "{ echo 'make finished but ../bin/ageland was not rebuilt'; exit 1; }; }"
     )
@@ -482,7 +482,7 @@ def revert_command(env: Env) -> str:
         "find backup -mindepth 1 -maxdepth 1 ! -name lib-text -exec cp -rp -t . {} +",
         # Force make to relink even when ../bin/ageland is newer than the restored objects.
         "find . -maxdepth 1 -name '*.o' -exec touch {} +",
-        "make all -j6",
+        "make all -j2",
         f"rm -f {marker}",
     ])
 
