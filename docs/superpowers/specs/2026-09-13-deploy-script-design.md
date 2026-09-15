@@ -195,6 +195,23 @@ remote command string is built with `shlex.quote`.
    owner or mode. It runs after the tag, so a failed tag leaves the port unrestarted (the report
    says so and prints the command) and a failed restart leaves the deploy tagged (the report prints
    the command and no revert hint).
+
+   Without a sudoers rule, sudo asks for a second password here: it remembers a password per
+   terminal, and each `ssh -t` is a new one. To skip that prompt, root installs a drop-in naming the
+   deploying logins and nothing but this command, checked by `visudo` before it goes in place:
+   ```sh
+   tmp=$(mktemp) && \
+   printf '%s ALL=(root) NOPASSWD: /bin/systemctl restart rotsbuilding, /usr/bin/systemctl restart rotsbuilding\n' "<user>, <user>" > "$tmp" && \
+   sudo visudo -cf "$tmp" && sudo install -m 0440 -o root -g root "$tmp" /etc/sudoers.d/rots-deploy; \
+   rm -f "$tmp"
+   ```
+   Both paths are listed because `/bin` and `/usr/bin` can name the same binary and sudo matches the
+   path it resolves. The file name must not contain a `.` (sudo skips those in `/etc/sudoers.d`).
+   `sudo -k; sudo -n -l systemctl restart rotsbuilding` prints the command without a prompt when
+   the rule matches; `sudo -l -U <user>` shows it for another login. Every other sudo use still
+   asks for a password, and step 3's `sudo chown` is not covered. Undo:
+   `sudo rm /etc/sudoers.d/rots-deploy`. The script works the same either way; it only changes
+   whether step 9 prompts.
 10. **Close and report.** Always close the master connection (`ssh -S <socket> -O exit`) and delete the
    temp directory, including after a failure or Ctrl-C. Print either success with the tag name, or
    the failed step plus a revert hint:
