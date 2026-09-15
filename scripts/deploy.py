@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Deploy RotS source and help files to one port on the game server.
 
-    scripts/deploy.py deploy <env> <user>@<host> <ssh-port> [--dry-run]
+    scripts/deploy.py deploy <env> <user>@<host> <ssh-port> [--dry-run] [--restart]
     scripts/deploy.py revert <env> <user>@<host> <ssh-port>
 
+For now only test, zzz-forge-test and zzz-forge-test-4k can be deployed or reverted, and only test
+can be restarted.
 The login and ssh port are arguments with no defaults, so this file never records them.
 Design: docs/superpowers/specs/2026-09-13-deploy-script-design.md
 """
@@ -65,6 +67,10 @@ class Env:
     tag_prefix: Optional[str]
     source_edits: Tuple[SourceEdit, ...] = ()
     require_branch: bool = True
+    # For now only envs marked deployable may be deployed or reverted.
+    deployable: bool = False
+    # The systemd service `deploy --restart` restarts; envs without one refuse --restart.
+    restart_service: Optional[str] = None
 
 
 ENVS = {
@@ -74,14 +80,15 @@ ENVS = {
         Env("4k", "live-pkarena4000", BOLD_MAGENTA, backup=True, tag_prefix="4k-",
             source_edits=(BIG_BROTHER_OFF,)),
         # The test port may be deployed from a feature branch, and is still tagged.
-        Env("test", "dev-building4802", YELLOW, backup=True, tag_prefix="test-", require_branch=False),
+        Env("test", "dev-building4802", YELLOW, backup=True, tag_prefix="test-", require_branch=False,
+            deployable=True, restart_service="rotsbuilding"),
         # The coding port keeps no backups (docs/Running the Game.md).
         Env("coders", "dev-coding4810", GREEN, backup=False, tag_prefix="coders-"),
         # Test targets: never tagged, and deployable from a feature branch.
         Env("zzz-forge-test", "zzz-forge-test", CYAN, backup=True, tag_prefix=None,
-            require_branch=False),
+            require_branch=False, deployable=True),
         Env("zzz-forge-test-4k", "zzz-forge-test", CYAN, backup=True, tag_prefix=None,
-            source_edits=(BIG_BROTHER_OFF,), require_branch=False),
+            source_edits=(BIG_BROTHER_OFF,), require_branch=False, deployable=True),
     )
 }
 
@@ -132,6 +139,9 @@ def build_parser() -> argparse.ArgumentParser:
         command_parser.add_argument("port", type=parse_port, metavar="ssh-port")
     deploy_parser.add_argument("--dry-run", action="store_true",
         help="run the local checks and print every step; change nothing")
+    deploy_parser.add_argument("--restart", action="store_true",
+        help="after a successful deploy, restart the port's service with sudo ("
+             + ", ".join(name for name, env in ENVS.items() if env.restart_service) + " only)")
     return parser
 
 
@@ -458,6 +468,13 @@ def build_command(env: Env) -> str:
     )
 
 
+def restart_command(env: Env) -> str:
+    """Restarts the env's service through sudo. Never changes the owner or mode of any file."""
+    if env.restart_service is None:
+        raise DeployError(f"{env.name} has no service to restart")
+    return f"sudo systemctl restart {q(env.restart_service)}"
+
+
 def revert_remote_command(env: Env) -> str:
     """The `revert` subcommand's remote step: refuse without a backup, revert, then check the relink."""
     base = port_dir(env)
@@ -555,6 +572,7 @@ STEP_TITLES = {
     6: "source edits",
     7: "build",
     8: "tag",
+    9: "restart",
 }
 
 
@@ -573,13 +591,19 @@ def banner(env: Env, server: Server, sha: str, subject: str, help_names: Sequenc
     ])
 
 
-def failure_report(env: Env, step: int, detail: str, color: bool, server: Optional[Server] = None) -> str:
+def failure_report(env: Env, step: int, detail: str, color: bool, server: Optional[Server] = None,
+                   restart: bool = False) -> str:
     lines = [paint(f"FAILED at step {step} ({STEP_TITLES[step]}): {detail}", BOLD_RED, color)]
     if step <= 4:
         # Step 3's sudo chown may have changed ownership, so "unchanged" only promises contents.
         lines.append("Nothing was uploaded; the source and help file contents on the server are unchanged.")
     elif step == 8:
         lines.append("The upload and build finished; only the local tag failed.")
+        if restart:
+            lines.append(f"The port was not restarted; on the server: {restart_command(env)}")
+    elif step == 9:
+        lines.append("The upload, build and tag finished; only the restart failed.")
+        lines.append(f"Check the port, and restart it on the server: {restart_command(env)}")
     elif env.backup:
         if server is not None:
             lines.append(f"To revert: scripts/deploy.py revert {env.name} {server.login} {server.port}")
@@ -598,7 +622,7 @@ def failure_report(env: Env, step: int, detail: str, color: bool, server: Option
     return "\n".join(lines)
 
 
-def dry_run_plan(env: Env, server: Server, repo: Path, help_names: Sequence[str]) -> str:
+def dry_run_plan(env: Env, server: Server, repo: Path, help_names: Sequence[str], restart: bool = False) -> str:
     shell = SshRunner(server, Path(SOCKET_PARENT) / "rots-deploy-XXXXXX")
 
     def ssh(command: str, tty: bool = False) -> str:
@@ -631,6 +655,8 @@ def dry_run_plan(env: Env, server: Server, repo: Path, help_names: Sequence[str]
     lines += step7
     lines += [f"== 8. {STEP_TITLES[8]}",
               f"  git tag -a {env.tag_prefix}YYYY-MM-DD[-N] <sha>" if env.tag_prefix else "  none: test target"]
+    lines += [f"== 9. {STEP_TITLES[9]}",
+              ssh(restart_command(env), tty=True) if restart else "  none: --restart not given"]
     lines += ["== close", "  " + shlex.join(shell.close_args())]
     return "\n".join(lines)
 
@@ -639,8 +665,8 @@ def _lines(output: str) -> List[str]:
     return [line for line in output.splitlines() if line.strip()]
 
 
-def deploy(env: Env, server: Server, checkout, runner, *, dry_run: bool, color: bool = False,
-           out: Callable[[str], None] = lambda line: print(line, flush=True),
+def deploy(env: Env, server: Server, checkout, runner, *, dry_run: bool, restart: bool = False,
+           color: bool = False, out: Callable[[str], None] = lambda line: print(line, flush=True),
            today: Optional[datetime.date] = None) -> int:
     """Run the deploy steps in order and return the process exit status."""
     step = 1
@@ -662,7 +688,7 @@ def deploy(env: Env, server: Server, checkout, runner, *, dry_run: bool, color: 
             raise DeployError("these help files would break in-game help:\n  " + "\n  ".join(problems))
         out(banner(env, server, sha, subject, help_names, color))
         if dry_run:
-            out(dry_run_plan(env, server, checkout.repo, help_names))
+            out(dry_run_plan(env, server, checkout.repo, help_names, restart))
             return 0
 
         begin(2)
@@ -715,20 +741,27 @@ def deploy(env: Env, server: Server, checkout, runner, *, dry_run: bool, color: 
             out(f"Tagged {sha[:7]} as {tag} (local only).")
         else:
             out(f"{env.name} is a test target; no tag.")
+
+        begin(9)
+        if restart:
+            out("Restarting the port with sudo; sudo may ask for a password.")
+            runner.remote(restart_command(env), tty=True)
+        else:
+            out("none: --restart not given")
     except DeployError as error:
-        out(failure_report(env, step, str(error), color, server))
+        out(failure_report(env, step, str(error), color, server, restart))
         return 1
     except KeyboardInterrupt:
-        out(failure_report(env, step, "interrupted", color, server))
+        out(failure_report(env, step, "interrupted", color, server, restart))
         return 130
     except Exception as error:
-        out(failure_report(env, step, f"unexpected error: {error!r}", color, server))
+        out(failure_report(env, step, f"unexpected error: {error!r}", color, server, restart))
         raise
     finally:
         runner.close()
 
-    out(paint(f"Deployed {sha[:7]} to {env.name}.", GREEN, color)
-        + (f" Tag: {tag}." if tag else "") + " Restart the port to run the new build.")
+    out(paint(f"Deployed {sha[:7]} to {env.name}.", GREEN, color) + (f" Tag: {tag}." if tag else "")
+        + (f" Restarted {env.restart_service}." if restart else " Restart the port to run the new build."))
     return 0
 
 
@@ -757,15 +790,24 @@ def revert(env: Env, server: Server, runner, *, color: bool = False,
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    env = ENVS[args.env]
+    if not env.deployable:
+        allowed = ", ".join(name for name, candidate in ENVS.items() if candidate.deployable)
+        parser.error(f"{env.name} cannot be deployed or reverted for now; only {allowed} can")
+    restart = args.command == "deploy" and args.restart
+    if restart and env.restart_service is None:
+        parser.error(f"--restart is not available for {env.name}, which has no service to restart")
     user, host = args.login
     server = Server(user, host, args.port)
     color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
     with tempfile.TemporaryDirectory(prefix="rots-deploy-", dir=SOCKET_PARENT) as work_dir:
         runner = SshRunner(server, Path(work_dir))
         if args.command == "revert":
-            return revert(ENVS[args.env], server, runner, color=color)
-        return deploy(ENVS[args.env], server, Checkout(REPO_ROOT), runner, dry_run=args.dry_run, color=color)
+            return revert(env, server, runner, color=color)
+        return deploy(env, server, Checkout(REPO_ROOT), runner, dry_run=args.dry_run, restart=restart,
+                      color=color)
 
 
 if __name__ == "__main__":

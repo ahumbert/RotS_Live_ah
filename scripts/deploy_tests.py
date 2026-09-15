@@ -63,6 +63,14 @@ class EnvTableTest(unittest.TestCase):
             self.assertIsNone(deploy.ENVS[name].tag_prefix)
             self.assertFalse(deploy.ENVS[name].require_branch)
 
+    def test_only_test_and_the_forge_test_targets_are_deployable(self) -> None:
+        self.assertEqual([name for name, env in deploy.ENVS.items() if env.deployable],
+                         ["test", "zzz-forge-test", "zzz-forge-test-4k"])
+
+    def test_only_test_restarts_and_it_restarts_rotsbuilding(self) -> None:
+        self.assertEqual({name: env.restart_service for name, env in deploy.ENVS.items() if env.restart_service},
+                         {"test": "rotsbuilding"})
+
     def test_port_dir_guard_rejects_anything_but_a_plain_name(self) -> None:
         for bad in ("../etc", "a/b", "", "Live", "a b", "x;rm"):
             env = deploy.Env("bad", bad, deploy.CYAN, backup=True, tag_prefix=None)
@@ -88,6 +96,13 @@ class ArgumentsTest(unittest.TestCase):
 
     def test_dry_run_flag(self) -> None:
         self.assertTrue(self.parse("deploy", "4k", "someone@example.org", "2222", "--dry-run").dry_run)
+
+    def test_restart_flag_is_off_unless_given(self) -> None:
+        self.assertFalse(self.parse("deploy", "test", "someone@example.org", "2222").restart)
+        self.assertTrue(self.parse("deploy", "test", "someone@example.org", "2222", "--restart").restart)
+
+    def test_revert_has_no_restart_flag(self) -> None:
+        self.assert_usage_error("revert", "test", "someone@example.org", "2222", "--restart")
 
     def test_every_argument_is_required(self) -> None:
         self.assert_usage_error()
@@ -748,6 +763,19 @@ class SourceEditCommandTest(RemoteCommandTestCase):
         self.assertNotIn(b"#define USE_BIG_BROTHER 1", self.header.read_bytes())
 
 
+class RestartCommandTest(unittest.TestCase):
+    def test_restarts_the_service_with_sudo_and_changes_no_file(self) -> None:
+        command = deploy.restart_command(deploy.ENVS["test"])
+
+        self.assertEqual(command, "sudo systemctl restart rotsbuilding")
+        self.assertNotIn("chown", command)
+        self.assertNotIn("chmod", command)
+
+    def test_an_env_without_a_service_has_no_restart_command(self) -> None:
+        with self.assertRaises(deploy.DeployError):
+            deploy.restart_command(TEST_ENV)
+
+
 class BuildCommandTest(RemoteCommandTestCase):
     def test_build_and_revert_run_make_with_two_jobs(self) -> None:
         for command in (deploy.build_command(TEST_ENV), deploy.revert_command(TEST_ENV)):
@@ -962,6 +990,21 @@ class FailureReportTest(unittest.TestCase):
         report = deploy.failure_report(TEST_ENV, 8, "boom", color=False)
 
         self.assertIn("only the local tag failed", report)
+        self.assertNotIn("restart", report)
+
+    def test_step_8_with_restart_says_the_port_was_not_restarted(self) -> None:
+        report = deploy.failure_report(deploy.ENVS["test"], 8, "boom", color=False, restart=True)
+
+        self.assertIn("only the local tag failed", report)
+        self.assertIn("not restarted; on the server: sudo systemctl restart rotsbuilding", report)
+
+    def test_step_9_names_the_restart_command_and_no_revert(self) -> None:
+        report = deploy.failure_report(deploy.ENVS["test"], 9, "boom", color=False, server=SERVER, restart=True)
+
+        self.assertIn("FAILED at step 9 (restart)", report)
+        self.assertIn("only the restart failed", report)
+        self.assertIn("sudo systemctl restart rotsbuilding", report)
+        self.assertNotIn("revert", report)
 
     def test_coders_keeps_the_no_backup_line_plus_the_ageland_warning_at_step_7(self) -> None:
         coders = deploy.ENVS["coders"]
@@ -1058,6 +1101,8 @@ class FakeRunner:
                 labels.append("dirs")
             elif "sed -i" in call[1]:
                 labels.append("edit")
+            elif "systemctl restart" in call[1]:
+                labels.append("restart")
             elif "make all" in call[1]:
                 labels.append("build")
             else:
@@ -1068,12 +1113,12 @@ class FakeRunner:
 class DeployTest(unittest.TestCase):
     DAY = datetime.date(2026, 9, 13)
 
-    def run_deploy(self, env_name, checkout=None, runner=None, dry_run=False):
+    def run_deploy(self, env_name, checkout=None, runner=None, dry_run=False, restart=False):
         self.checkout = checkout or FakeCheckout()
         self.runner = runner or FakeRunner()
         self.output = []
         status = deploy.deploy(deploy.ENVS[env_name], SERVER, self.checkout, self.runner, dry_run=dry_run,
-                               out=self.output.append, today=self.DAY)
+                               restart=restart, out=self.output.append, today=self.DAY)
         return status
 
     def text(self):
@@ -1089,6 +1134,37 @@ class DeployTest(unittest.TestCase):
         self.assertEqual(self.checkout.prepared, [False])
         self.assertIn("Tag: test-2026-09-13.", self.text())
         self.assertIn("someone@example.org:/rots/dev-building4802", self.text())
+        self.assertIn("Restart the port to run the new build.", self.text())
+
+    def test_restart_runs_after_the_tag_through_a_tty(self) -> None:
+        self.assertEqual(self.run_deploy("test", restart=True), 0)
+
+        self.assertEqual(self.runner.kinds(), ["connect", "dirs", "links", "unfinished", "unwritable", "backup",
+                                               "mark", "sftp", "build", "finish", "restart", "close"])
+        self.assertEqual(len(self.checkout.tags), 1)
+        restart = [call for call in self.runner.calls if call[0] == "remote" and "systemctl" in call[1]][0]
+        self.assertEqual(restart[1:], ("sudo systemctl restart rotsbuilding", True))
+        self.assertIn("Restarted rotsbuilding.", self.text())
+        self.assertNotIn("Restart the port", self.text())
+
+    def test_failed_restart_reports_step_9_after_tagging(self) -> None:
+        runner = FakeRunner(fail_when=lambda call: call[0] == "remote" and "systemctl" in call[1])
+
+        self.assertEqual(self.run_deploy("test", runner=runner, restart=True), 1)
+
+        self.assertEqual(self.runner.kinds()[-2:], ["restart", "close"])
+        self.assertEqual(len(self.checkout.tags), 1)
+        self.assertIn("FAILED at step 9 (restart)", self.text())
+        self.assertNotIn("Deployed abc1234", self.text())
+
+    def test_failed_tag_does_not_restart(self) -> None:
+        checkout = FakeCheckout()
+        checkout.create_tag = mock.Mock(side_effect=deploy.DeployError("tag boom"))
+
+        self.assertEqual(self.run_deploy("test", checkout=checkout, restart=True), 1)
+
+        self.assertNotIn("restart", self.runner.kinds())
+        self.assertIn("not restarted", self.text())
 
     def test_4k_edits_the_source_after_upload_and_before_build(self) -> None:
         self.assertEqual(self.run_deploy("4k"), 0)
@@ -1227,8 +1303,10 @@ class DeployTest(unittest.TestCase):
                 self.assertEqual(self.runner.kinds(), ["close"])
                 self.assertEqual(self.checkout.prepared, [True])
                 self.assertEqual(self.checkout.tags, [])
-                for number in range(1, 9):
+                for number in range(1, 10):
                     self.assertIn(f"== {number}. {deploy.STEP_TITLES[number]}", self.text())
+                self.assertIn("none: --restart not given", self.text())
+                self.assertNotIn("systemctl", self.text())
                 self.assertIn("ssh -M -S", self.text())
                 self.assertIn('put "help_tbl"', self.text())
                 self.assertIn("git pull --ff-only", self.text())
@@ -1250,6 +1328,13 @@ class DeployTest(unittest.TestCase):
                     else:
                         self.assertNotIn(line, self.text())
 
+    def test_dry_run_with_restart_prints_the_restart_and_runs_nothing(self) -> None:
+        self.assertEqual(self.run_deploy("test", dry_run=True, restart=True), 0)
+
+        self.assertEqual(self.runner.kinds(), ["close"])
+        self.assertIn("== 9. restart", self.text())
+        self.assertIn("-t -p 2222 someone@example.org 'sh -c '\"'\"'sudo systemctl restart rotsbuilding", self.text())
+
     def test_warnings_are_shown(self) -> None:
         self.run_deploy("zzz-forge-test", checkout=FakeCheckout(warnings=["on 'feat/x'"]))
 
@@ -1257,16 +1342,48 @@ class DeployTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
+    def assert_refused(self, argv, message):
+        stderr = io.StringIO()
+        with mock.patch.object(deploy, "deploy") as not_deploy, mock.patch.object(deploy, "revert") as not_revert, \
+                contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as caught:
+            deploy.main(argv)
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn(message, stderr.getvalue())
+        not_deploy.assert_not_called()
+        not_revert.assert_not_called()
+
     def test_wires_arguments_into_deploy(self) -> None:
         with mock.patch.object(deploy, "deploy", return_value=0) as run:
-            self.assertEqual(deploy.main(["deploy", "4k", "someone@example.org", "2222", "--dry-run"]), 0)
+            self.assertEqual(deploy.main(["deploy", "zzz-forge-test-4k", "someone@example.org", "2222", "--dry-run"]), 0)
 
         env, server, checkout, runner = run.call_args.args
-        self.assertEqual(env, deploy.ENVS["4k"])
+        self.assertEqual(env, deploy.ENVS["zzz-forge-test-4k"])
         self.assertEqual(server, SERVER)
         self.assertEqual(checkout.repo, deploy.REPO_ROOT)
         self.assertTrue(str(runner.socket).startswith("/tmp/rots-deploy-"))
         self.assertTrue(run.call_args.kwargs["dry_run"])
+        self.assertFalse(run.call_args.kwargs["restart"])
+
+    def test_wires_restart_into_deploy_for_test(self) -> None:
+        with mock.patch.object(deploy, "deploy", return_value=0) as run:
+            self.assertEqual(deploy.main(["deploy", "test", "someone@example.org", "2222", "--restart"]), 0)
+
+        self.assertTrue(run.call_args.kwargs["restart"])
+
+    def test_envs_that_are_not_approved_cannot_deploy_or_revert(self) -> None:
+        for command in ("deploy", "revert"):
+            for name in ("live", "4k", "coders"):
+                with self.subTest(command=command, env=name):
+                    self.assert_refused([command, name, "someone@example.org", "2222"],
+                                        f"{name} cannot be deployed or reverted for now; "
+                                        "only test, zzz-forge-test, zzz-forge-test-4k can")
+        self.assert_refused(["deploy", "live", "someone@example.org", "2222", "--dry-run"], "live cannot be deployed")
+
+    def test_restart_is_refused_for_the_forge_test_targets(self) -> None:
+        for name in ("zzz-forge-test", "zzz-forge-test-4k"):
+            with self.subTest(env=name):
+                self.assert_refused(["deploy", name, "someone@example.org", "2222", "--restart"],
+                                    f"--restart is not available for {name}")
 
     def test_wires_revert_arguments_into_revert(self) -> None:
         with mock.patch.object(deploy, "revert", return_value=0) as run, \

@@ -19,11 +19,14 @@ and help-file upload.
 
 **Out, and why:**
 
-- *Restarting a port.* Wanted later as a separate `restart <env>` subcommand, and after that as a
-  flag to restart at the end of a deploy. Not in this version; the argument parser leaves room for
-  it. (When it lands: live/test/coders use `systemctl restart rotslive|rotsbuilding|rotscoding` per
-  `docs/Running the Game.md`; 4k has no service and should print a manual-restart message. Help
+- *Restarting a port, except test.* `deploy test --restart` runs `sudo systemctl restart
+  rotsbuilding` at the end (step 9); every other env refuses `--restart`, and without the flag
+  nothing restarts. There is no separate `restart <env>` subcommand. (If live/coders get it later:
+  `systemctl restart rotslive|rotscoding` per `docs/Running the Game.md`; 4k has no service. Help
   tables alone can also be picked up without a restart via in-game `reload xhelp`.)
+- *Deploying or reverting live, 4k, or coders.* For now only `test`, `zzz-forge-test` and
+  `zzz-forge-test-4k` are approved; `deploy` and `revert` on any other env stop with a usage error
+  before anything runs, dry runs included. Their table entries stay so they can be approved later.
 - *Other `lib/text` files.* `motd`, `news`, `wizlist`, `immlist`, `bugs`, `typos`, `ideas`, etc. are
   owned by the server (the repo copies date from 2018–2020, and `../bin/autowiz` rewrites the
   wizlists). They are never uploaded.
@@ -39,14 +42,14 @@ Every env is on the one server named by the required `<user>@<host>` and `<ssh-p
 (see **Usage**). Remote port dir is `/rots/<dir>`; source is `<dir>/src`,
 help files are `<dir>/lib/text`.
 
-| env                 | dir                | banner color | backup | tag prefix | source edits          |
-|---------------------|--------------------|--------------|--------|------------|-----------------------|
-| `live`              | `live-default3791` | bold red     | yes    | `live-`    | —                     |
-| `4k`                | `live-pkarena4000` | bold magenta | yes    | `4k-`      | `USE_BIG_BROTHER` 1→0 |
-| `test`              | `dev-building4802` | yellow       | yes    | `test-`    | —                     |
-| `coders`            | `dev-coding4810`   | green        | **no** | `coders-`  | —                     |
-| `zzz-forge-test`    | `zzz-forge-test`   | cyan         | yes    | none       | —                     |
-| `zzz-forge-test-4k` | `zzz-forge-test`   | cyan         | yes    | none       | `USE_BIG_BROTHER` 1→0 |
+| env                 | dir                | banner color | backup | tag prefix | source edits          | approved | `--restart`    |
+|---------------------|--------------------|--------------|--------|------------|-----------------------|----------|----------------|
+| `live`              | `live-default3791` | bold red     | yes    | `live-`    | —                     | **no**   | —              |
+| `4k`                | `live-pkarena4000` | bold magenta | yes    | `4k-`      | `USE_BIG_BROTHER` 1→0 | **no**   | —              |
+| `test`              | `dev-building4802` | yellow       | yes    | `test-`    | —                     | yes      | `rotsbuilding` |
+| `coders`            | `dev-coding4810`   | green        | **no** | `coders-`  | —                     | **no**   | —              |
+| `zzz-forge-test`    | `zzz-forge-test`   | cyan         | yes    | none       | —                     | yes      | —              |
+| `zzz-forge-test-4k` | `zzz-forge-test`   | cyan         | yes    | none       | `USE_BIG_BROTHER` 1→0 | yes      | —              |
 
 Coders keeps no backups (`docs/Running the Game.md`). `zzz-forge-test-4k` exists so the 4k source
 edit can be exercised without touching the 4k port.
@@ -85,8 +88,11 @@ before the first scripted deploy.
 ```
 scripts/deploy.py deploy <env> <user>@<host> <ssh-port>
 scripts/deploy.py deploy <env> <user>@<host> <ssh-port> --dry-run
+scripts/deploy.py deploy test <user>@<host> <ssh-port> --restart
 scripts/deploy.py revert <env> <user>@<host> <ssh-port>
 ```
+
+`<env>` must be an approved env (see **Environments**); `--restart` is only accepted for `test`.
 
 `revert` puts an env with a backup back to its `src/backup`: it asks for the ssh password once,
 restores `src/` and the help files, forces a relink, clears `src/DEPLOY_IN_PROGRESS`, and checks
@@ -106,7 +112,7 @@ holding it. In normal use that is `RotS_Live_DEPLOY`.
 
 ## Steps
 
-Each step checks its result; any failure stops the run, skips to step 9, and names the failed step.
+Each step checks its result; any failure stops the run, skips to step 10, and names the failed step.
 
 **Local**
 
@@ -181,7 +187,15 @@ remote command string is built with `shlex.quote`.
    there is no previous tag. `git show <tag>` therefore tells whether a deploy carried help updates.
    A help file deleted from the repo since the previous tag is not listed as a help change (and, per
    **Scope**, it is not deleted on the server either).
-9. **Close and report.** Always close the master connection (`ssh -S <socket> -O exit`) and delete the
+
+**Remote (ssh)**
+
+9. **Restart** (only with `--restart`, which only `test` accepts). `sudo systemctl restart
+   rotsbuilding` over `ssh -t`, so a sudo password prompt reaches the terminal. It changes no file's
+   owner or mode. It runs after the tag, so a failed tag leaves the port unrestarted (the report
+   says so and prints the command) and a failed restart leaves the deploy tagged (the report prints
+   the command and no revert hint).
+10. **Close and report.** Always close the master connection (`ssh -S <socket> -O exit`) and delete the
    temp directory, including after a failure or Ctrl-C. Print either success with the tag name, or
    the failed step plus a revert hint:
    - envs with a backup: `scripts/deploy.py revert <env> <user>@<host> <ssh-port>`, with the
@@ -207,7 +221,11 @@ parts that run commands:
 **Automated** — `scripts/deploy_tests.py`, `unittest`, no network:
 
 - Env table: every env's dir matches the path guard; only `4k` and `zzz-forge-test-4k` carry the
-  source edit; coders has no backup; zzz envs have no tag prefix.
+  source edit; coders has no backup; zzz envs have no tag prefix; only `test` and the zzz envs are
+  approved; only `test` has a restart service (`rotsbuilding`).
+- Approval and restart: `deploy`/`revert` on live, 4k, or coders (dry run included) and `--restart`
+  on a zzz env stop with a usage error without calling the deploy or revert; `--restart` runs the
+  sudo restart over a tty after the tag, never after a failed tag, and reports its own failure.
 - Arguments: `<env> <user>@<host> <ssh-port>` all required, in that order; a missing argument, a
   login without `@` or with two, and a non-numeric port stop with a usage message; the parsed user,
   host, and port reach every ssh/sftp command.
