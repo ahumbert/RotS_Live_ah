@@ -48,10 +48,14 @@ class EnvTableTest(unittest.TestCase):
     def test_coders_is_the_only_env_without_a_backup(self) -> None:
         self.assertEqual([name for name, env in deploy.ENVS.items() if not env.backup], ["coders"])
 
-    def test_real_ports_are_tagged_and_need_the_deploy_branch(self) -> None:
+    def test_real_ports_are_tagged(self) -> None:
         for name in ("live", "4k", "test", "coders"):
             self.assertEqual(deploy.ENVS[name].tag_prefix, name + "-")
+
+    def test_only_the_test_port_allows_any_branch(self) -> None:
+        for name in ("live", "4k", "coders"):
             self.assertTrue(deploy.ENVS[name].require_branch)
+        self.assertFalse(deploy.ENVS["test"].require_branch)
 
     def test_test_targets_are_untagged_and_allow_any_branch(self) -> None:
         for name in ("zzz-forge-test", "zzz-forge-test-4k"):
@@ -295,6 +299,15 @@ class CheckCheckoutTest(GitRepoTestCase):
 
         self.assertEqual(len(warnings), 1)
         self.assertIn("feat/x", warnings[0])
+
+    def test_other_branch_only_warns_for_the_test_port(self) -> None:
+        self.run_git("checkout", "-q", "-b", "feat/x")
+
+        warnings = deploy.check_checkout(self.repo, deploy.ENVS["test"])
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("feat/x", warnings[0])
+        self.assertIn("test allows any branch", warnings[0])
 
 
 class CheckoutTest(GitRepoTestCase):

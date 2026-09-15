@@ -73,7 +73,8 @@ ENVS = {
         Env("live", "live-default3791", BOLD_RED, backup=True, tag_prefix="live-"),
         Env("4k", "live-pkarena4000", BOLD_MAGENTA, backup=True, tag_prefix="4k-",
             source_edits=(BIG_BROTHER_OFF,)),
-        Env("test", "dev-building4802", YELLOW, backup=True, tag_prefix="test-"),
+        # The test port may be deployed from a feature branch, and is still tagged.
+        Env("test", "dev-building4802", YELLOW, backup=True, tag_prefix="test-", require_branch=False),
         # The coding port keeps no backups (docs/Running the Game.md).
         Env("coders", "dev-coding4810", GREEN, backup=False, tag_prefix="coders-"),
         # Test targets: never tagged, and deployable from a feature branch.
@@ -231,7 +232,7 @@ def check_checkout(repo: Path, env: Env) -> List[str]:
     message = f"the checkout is on {branch!r}, not {DEPLOY_BRANCH!r}"
     if env.require_branch:
         raise DeployError(message)
-    return [message + "; deploying it without pulling because this is a test target"]
+    return [message + f"; deploying it without pulling because {env.name} allows any branch"]
 
 
 def next_tag_name(prefix: str, day: datetime.date, existing: Iterable[str]) -> str:

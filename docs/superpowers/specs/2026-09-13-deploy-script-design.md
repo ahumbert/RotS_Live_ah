@@ -113,8 +113,8 @@ Each step checks its result; any failure stops the run, skips to step 9, and nam
 1. **Pull and check.** Stop if `git status --porcelain` shows uncommitted changes, or if `src/`
    contains untracked or ignored files whose names do not start with `.` (these would be uploaded by
    `put -r *`; dotfiles such as `src/.remember/` are not matched by `*`). Stop if the branch is not
-   `release-frodo` — for `zzz-forge-test*` this is only a warning, so the script can be tested from
-   its feature branch. Then `git pull --ff-only`; record the commit SHA and subject. Then compute the
+   `release-frodo` — for `test` and `zzz-forge-test*` this is only a warning, so those ports can be
+   deployed from a feature branch (with no pull; `test` is still tagged). Then `git pull --ff-only`; record the commit SHA and subject. Then compute the
    help-file set and run the format check (see **Help files**).
 2. **Banner, then connect.** Print the target (`<user>@<host>:/rots/<dir>`, dir in the env's
    color), the commit, any source edits, and the help files to upload. Then open an OpenSSH master
