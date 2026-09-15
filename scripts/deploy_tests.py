@@ -549,17 +549,20 @@ OTHER_GROUPS = [group for group in os.getgroups() if group != os.getgid()]
 
 
 class ChownCommandTest(RemoteCommandTestCase):
-    def test_is_valid_sh_targets_the_ssh_user_and_never_dereferences_symlinks(self) -> None:
+    def test_is_valid_sh_changes_only_what_is_inside_the_folders_and_never_follows_symlinks(self) -> None:
         command = deploy.chown_command(TEST_ENV, "someone", ["help_tbl"])
 
         self.assertEqual(subprocess.run(["sh", "-n", "-c", command]).returncode, 0)
-        self.assertIn("sudo chown -hR someone /rots/zzz-forge-test/src /rots/zzz-forge-test/bin", command)
-        self.assertIn("sudo chown -h someone /rots/zzz-forge-test/lib/text", command)
-        self.assertNotRegex(command, r"sudo chown (?!-h)")
+        self.assertIn("sudo find -H /rots/zzz-forge-test/src /rots/zzz-forge-test/bin -mindepth 1 "
+                      "-exec chown -h someone {} +", command)
+        self.assertIn('sudo chown -h someone "$f"', command)
+        self.assertNotIn("chown -hR", command)
+        self.assertNotRegex(command, r"chown (?!-h)")
+        self.assertNotRegex(command, r"chown -h someone /rots/zzz-forge-test/(src|bin|lib/text)( |$)")
 
     @unittest.skipUnless(OTHER_GROUPS, "needs a second group to change files to without sudo")
-    def test_leaves_files_outside_the_port_alone_when_run_as_chgrp(self) -> None:
-        # chown needs sudo; chgrp takes the same -h/-R flags and symlink handling, so it stands in here.
+    def test_changes_contents_but_not_the_folders_or_anything_outside_when_run_as_chgrp(self) -> None:
+        # chown needs sudo; chgrp takes the same -h flag and symlink handling, so it stands in here.
         import grp
         outside = self.root.parent / "outside"
         outside.mkdir()
@@ -569,60 +572,22 @@ class ChownCommandTest(RemoteCommandTestCase):
         os.symlink(victims[0], self.root / "src" / "link_to_outside")
         (self.root / "lib" / "text" / "help_tbl").unlink()
         os.symlink(victims[1], self.root / "lib" / "text" / "help_tbl")
-        group = grp.getgrgid(OTHER_GROUPS[0]).gr_name
-        command = deploy.chown_command(TEST_ENV, "USER", ["help_tbl"]).replace("sudo chown", "chgrp")
-        command = command.replace(" USER ", f" {group} ")
+        (self.root / "src" / "tests").mkdir()
+        (self.root / "src" / "tests" / "t.cpp").write_text("t\n")
+        (self.root / "lib" / "text" / "spel_tbl").write_text("A\n#~\n")
+        group = grp.getgrgid(OTHER_GROUPS[0])
+        command = deploy.chown_command(TEST_ENV, "USER", ["help_tbl", "spel_tbl"])
+        command = command.replace("sudo ", "").replace("chown -h USER", f"chgrp -h {group.gr_name}")
 
         result = self.sh(command)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for inside in ("src/game.cpp", "src/tests", "src/tests/t.cpp", "lib/text/spel_tbl"):
+            self.assertEqual((self.root / inside).stat().st_gid, group.gr_gid, inside)
+        for folder in ("src", "bin", "lib/text"):
+            self.assertEqual((self.root / folder).stat().st_gid, os.getgid(), folder)
         for victim in victims:
             self.assertEqual(victim.stat().st_gid, os.getgid(), victim)
-
-
-@unittest.skipIf(os.geteuid() == 0, "root can write everything")
-class ChmodOwnedCommandTest(RemoteCommandTestCase):
-    def test_makes_owned_read_only_files_and_dirs_writable_without_sudo(self) -> None:
-        game = self.root / "src" / "game.cpp"
-        help_table = self.root / "lib" / "text" / "help_tbl"
-        text_dir = self.root / "lib" / "text"
-        game.chmod(0o444)
-        help_table.chmod(0o444)
-        text_dir.chmod(0o555)
-        self.addCleanup(text_dir.chmod, 0o755)
-        command = deploy.chmod_owned_command(TEST_ENV, ["help_tbl", "not_there_tbl"])
-
-        result = self.sh(command)
-
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn("sudo", command)
-        for path in (game, help_table, text_dir):
-            self.assertTrue(os.access(path, os.W_OK), path)
-        self.assertEqual(self.sh(deploy.unwritable_command(TEST_ENV, ["help_tbl"])).stdout, "")
-
-    def test_never_follows_symlinks_out_of_the_port(self) -> None:
-        outside = self.root.parent / "outside"
-        outside.mkdir()
-        victims = [outside / "via_src", outside / "via_help"]
-        for victim in victims:
-            victim.write_text("outside\n")
-            victim.chmod(0o444)
-            self.addCleanup(victim.chmod, 0o644)
-        os.symlink(victims[0], self.root / "src" / "link_to_outside")
-        (self.root / "lib" / "text" / "help_tbl").unlink()
-        os.symlink(victims[1], self.root / "lib" / "text" / "help_tbl")
-
-        self.assertEqual(self.sh(deploy.chmod_owned_command(TEST_ENV, ["help_tbl"])).returncode, 0)
-
-        for victim in victims:
-            self.assertEqual(victim.stat().st_mode & 0o777, 0o444, victim)
-
-    def test_leaves_writable_files_alone(self) -> None:
-        before = (self.root / "src" / "game.cpp").stat().st_mode
-
-        self.assertEqual(self.sh(deploy.chmod_owned_command(TEST_ENV, ["help_tbl"])).returncode, 0)
-
-        self.assertEqual((self.root / "src" / "game.cpp").stat().st_mode, before)
 
 
 class BackupCommandTest(RemoteCommandTestCase):
@@ -1065,8 +1030,6 @@ class FakeRunner:
                 labels.append("finish")
             elif deploy.DEPLOY_MARKER in call[1]:
                 labels.append("unfinished")
-            elif "chmod u+w" in call[1]:
-                labels.append("chmod")
             elif "sudo chown" in call[1]:
                 labels.append("chown")
             elif "backup.new" in call[1]:
@@ -1163,32 +1126,28 @@ class DeployTest(unittest.TestCase):
         self.assertIn("FAILED at step 3", self.text())
         self.assertEqual(self.checkout.tags, [])
 
-    def test_owned_read_only_files_are_fixed_with_chmod_and_no_sudo(self) -> None:
+    def test_unwritable_files_are_chowned_with_a_tty_then_rechecked(self) -> None:
         runner = FakeRunner(unwritable=["/rots/dev-building4802/src/game.cpp\n", ""])
 
         self.assertEqual(self.run_deploy("test", runner=runner), 0)
 
         self.assertEqual(self.runner.kinds()[:8],
-                         ["connect", "dirs", "links", "unfinished", "unwritable", "chmod", "unwritable", "backup"])
-        self.assertNotIn("chown", self.runner.kinds())
-        self.assertNotIn("sudo may ask for a password", self.text())
-        self.assertIn("Fixed with chmod u+w; no sudo needed.", self.text())
-        chmod = [call for call in self.runner.calls if call[0] == "remote" and "chmod u+w" in call[1]][0]
-        self.assertFalse(chmod[2])
-        self.assertIn("/rots/dev-building4802/src/game.cpp", self.text())
-
-    def test_files_chmod_cannot_fix_are_chowned_with_a_tty_then_chmodded_and_rechecked(self) -> None:
-        runner = FakeRunner(unwritable=["/rots/dev-building4802/src/game.cpp\n",
-                                        "/rots/dev-building4802/src/game.cpp\n", ""])
-
-        self.assertEqual(self.run_deploy("test", runner=runner), 0)
-
-        self.assertEqual(self.runner.kinds()[:11],
-                         ["connect", "dirs", "links", "unfinished", "unwritable", "chmod", "unwritable", "chown",
-                          "chmod", "unwritable", "backup"])
+                         ["connect", "dirs", "links", "unfinished", "unwritable", "chown", "unwritable", "backup"])
         chown = [call for call in self.runner.calls if call[0] == "remote" and "sudo chown" in call[1]][0]
         self.assertTrue(chown[2])
         self.assertIn("sudo may ask for a password", self.text())
+        self.assertIn("/rots/dev-building4802/src/game.cpp", self.text())
+
+    def test_an_unwritable_folder_stops_without_asking_for_sudo(self) -> None:
+        runner = FakeRunner(unwritable=["/rots/dev-building4802/lib/text\n"])
+
+        self.assertEqual(self.run_deploy("test", runner=runner), 1)
+
+        self.assertNotIn("chown", self.runner.kinds())
+        self.assertNotIn("backup", self.runner.kinds())
+        self.assertIn("FAILED at step 3", self.text())
+        self.assertIn("/rots/dev-building4802/lib/text", self.text())
+        self.assertIn("fix", self.text())
 
     def test_still_unwritable_after_chown_stops_before_backup(self) -> None:
         runner = FakeRunner(unwritable=["/rots/dev-building4802/src/game.cpp\n"])
@@ -1255,7 +1214,8 @@ class DeployTest(unittest.TestCase):
                 self.assertIn("ssh -M -S", self.text())
                 self.assertIn('put "help_tbl"', self.text())
                 self.assertIn("git pull --ff-only", self.text())
-                self.assertIn("chmod u+w", self.text())
+                self.assertNotIn("chmod", self.text())
+                self.assertIn("-mindepth 1 -exec chown -h someone {} +", self.text())
                 self.assertIn("readlink -m", self.text())
                 env = deploy.ENVS[name]
                 shell = deploy.SshRunner(SERVER, Path(deploy.SOCKET_PARENT) / "rots-deploy-XXXXXX")

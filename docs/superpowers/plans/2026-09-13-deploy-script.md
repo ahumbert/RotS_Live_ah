@@ -1938,13 +1938,13 @@ Expected: exit 0; on the server `grep USE_BIG_BROTHER /rots/zzz-forge-test/src/b
 
 - [ ] **Step 5: Ownership pre-check**
 
-Two cases, each on a copy of a source file in `/rots/zzz-forge-test/src`, then `deploy zzz-forge-test`:
-- Owned by the ssh user but read-only (`chmod 444`). Expected: step 3 lists it, fixes it with
-  `chmod u+w` (no sudo prompt), re-checks, and continues.
-- Owned by another user (`sudo chown root` then `sudo chmod 644`). Expected: step 3 lists it, the
-  `chmod u+w` pass cannot fix it, `sudo chown` runs with a terminal (one sudo prompt), then
-  `chmod u+w`, re-check, and continues — or, if sudo is refused, stops with "still not writable"
-  before any backup or upload.
+Two cases, then `deploy zzz-forge-test`:
+- A copy of a source file in `/rots/zzz-forge-test/src` owned by another user (`sudo chown root`
+  then `sudo chmod 644`). Expected: step 3 lists it, runs `sudo chown` on what is inside the folders
+  with a terminal (one sudo prompt), re-checks, and continues — or, if sudo is refused, stops with
+  "still not writable" before any backup or upload.
+- One of the three folders itself unwritable (e.g. `lib/text` owned by another user, mode 750).
+  Expected: step 3 stops at once, names the folder, asks for no sudo password, and changes nothing.
 
 - [ ] **Step 6: A broken help table stops before connecting**
 
