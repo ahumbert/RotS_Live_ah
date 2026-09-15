@@ -41,6 +41,7 @@ void clear_char(struct char_data* ch, int mode);
 sh_int get_naked_perception(struct char_data* ch);
 int register_pc_char(struct char_data* ch);
 void introduce_char(struct descriptor_data* d);
+int Crash_alias_load(struct char_data* ch, FILE* fp);
 int create_entry(char* name);
 void save_player(struct char_data* ch, int load_room, int index_pos);
 int process_input(struct descriptor_data* t);
@@ -4752,6 +4753,97 @@ TEST(InterpreAccountMenu, IntroduceCharForAccountBackedCharactersAvoidsLegacyFil
     EXPECT_NE(stat("players", &file_info), 0);
     EXPECT_NE(stat("plrobjs", &file_info), 0);
     EXPECT_NE(stat("exploits", &file_info), 0);
+
+    free_char(descriptor.character);
+    descriptor.character = nullptr;
+    free_char(loaded_character);
+}
+
+TEST(InterpreAccountMenu, IntroduceCharForAccountBackedCharacterDoesNotInheritLeftoverLegacyObjectFiles)
+{
+    // A legacy plrobjs/<name>.obj can outlive its character -- the live server has hundreds with no
+    // character at all. The first login reads that file BEFORE the account-native one (Crash_load),
+    // and a brand-new character goes straight from creation into the game without passing through
+    // selection, which is what clears these files for an existing character. So a new character
+    // given that name used to walk in carrying the old one's equipment and aliases.
+    TemporaryDirectory temp_directory;
+    ScopedWorkingDirectory working_directory(temp_directory.path());
+    ScopedPlayerTableReset player_table_reset;
+    ScopedStartRoomOverride start_room_override(RACE_HUMAN, 0);
+
+    ASSERT_EQ(mkdir("accounts", 0700), 0);
+    ASSERT_EQ(mkdir("accounts/A-E", 0700), 0);
+    ASSERT_EQ(mkdir("plrobjs", 0700), 0);
+    ASSERT_EQ(mkdir("plrobjs/A-E", 0700), 0);
+    ASSERT_EQ(mkdir("exploits", 0700), 0);
+    ASSERT_EQ(mkdir("exploits/A-E", 0700), 0);
+    ensure_test_world_room(1200);
+    create_entry(const_cast<char*>("existingplayer"));
+    static char test_motd[] = "Test MOTD\r\n";
+    ScopedMotdOverride motd_override(test_motd);
+
+    std::string error_message;
+    ASSERT_TRUE(account::create_account(".", "acct", "player@example.com", "ValidPass1", 1700010200, nullptr, &error_message)) << error_message;
+
+    objects_json::ObjectSaveData leftover_objects;
+    leftover_objects.rent.rentcode = RENT_CRASH;
+    leftover_objects.aliases.push_back({ "inheritmark", "say left behind by the old character" });
+    std::string leftover_object_bytes;
+    ASSERT_TRUE(objects_json::object_save_data_to_binary(leftover_objects, &leftover_object_bytes, &error_message)) << error_message;
+    const std::string leftover_object_path = account::legacy_object_file_path(".", "aragorn");
+    const std::string leftover_exploits_path = account::legacy_exploits_file_path(".", "aragorn");
+    {
+        FILE* file = std::fopen(leftover_object_path.c_str(), "wb");
+        ASSERT_NE(file, nullptr);
+        ASSERT_EQ(std::fwrite(leftover_object_bytes.data(), 1, leftover_object_bytes.size(), file), leftover_object_bytes.size());
+        ASSERT_EQ(std::fclose(file), 0);
+        file = std::fopen(leftover_exploits_path.c_str(), "wb");
+        ASSERT_NE(file, nullptr);
+        const std::string leftover_exploit_bytes(sizeof(exploit_record), '\0');
+        ASSERT_EQ(std::fwrite(leftover_exploit_bytes.data(), 1, leftover_exploit_bytes.size(), file), leftover_exploit_bytes.size());
+        ASSERT_EQ(std::fclose(file), 0);
+    }
+
+    descriptor_data descriptor = make_descriptor();
+    descriptor.character = new char_data {};
+    clear_char(descriptor.character, MOB_VOID);
+    register_pc_char(descriptor.character);
+    descriptor.character->desc = &descriptor;
+    descriptor.connected = CON_QSEX;
+    std::snprintf(descriptor.host, sizeof(descriptor.host), "%s", "127.0.0.1");
+    std::snprintf(descriptor.pwd, sizeof(descriptor.pwd), "%s", "*ACCOUNT*");
+    descriptor.character->player.sex = SEX_MALE;
+    descriptor.character->player.race = RACE_HUMAN;
+    descriptor.character->player.name = strdup("aragorn");
+
+    introduce_char(&descriptor);
+
+    account::AccountData reloaded_account;
+    ASSERT_TRUE(account::read_account_file(".", "acct", &reloaded_account, &error_message)) << error_message;
+    ASSERT_EQ(reloaded_account.characters.size(), 1u) << descriptor.output;
+
+    struct stat file_info { };
+    EXPECT_NE(stat(leftover_object_path.c_str(), &file_info), 0)
+        << "a leftover legacy object file must not survive into the new character's first login";
+    EXPECT_NE(stat(leftover_exploits_path.c_str(), &file_info), 0);
+
+    // The first login, as enter-game performs it.
+    char_file_u stored_character {};
+    ASSERT_TRUE(account::read_account_character_file(".", "acct", "aragorn", &stored_character, &error_message)) << error_message;
+    std::string object_bytes;
+    ASSERT_TRUE(load_object_save_bytes_for_character(".", "aragorn", &object_bytes, &error_message)) << error_message;
+    char_data* loaded_character = new char_data {};
+    clear_char(loaded_character, MOB_VOID);
+    store_to_char(&stored_character, loaded_character);
+    descriptor_data loaded_descriptor = make_descriptor();
+    std::snprintf(loaded_descriptor.account_name, sizeof(loaded_descriptor.account_name), "%s", "acct");
+    loaded_character->desc = &loaded_descriptor;
+    stage_account_backed_object_bytes_for_character(loaded_character, object_bytes.data(), object_bytes.size());
+    FILE* fp = Crash_load(loaded_character);
+    ASSERT_NE(fp, nullptr);
+    Crash_alias_load(loaded_character, fp);
+    EXPECT_EQ(std::fclose(fp), 0);
+    EXPECT_EQ(GET_ALIAS(loaded_character), nullptr) << "the new character loaded the old character's aliases";
 
     free_char(descriptor.character);
     descriptor.character = nullptr;

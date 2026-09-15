@@ -375,7 +375,10 @@ namespace {
         return true;
     }
 
-    bool hydrate_account_native_object_file_from_migration(const std::string& root_directory, const std::string& account_name, const std::string& character_name, const CharacterMigrationData& snapshot_data, std::string* error_message)
+    // `converted_source`, when given, receives what was parsed from the legacy .obj so the caller can
+    // verify the written file against it. Untouched when there is no legacy file: a default file is
+    // written instead, and the caller only checks that it reads back.
+    bool hydrate_account_native_object_file_from_migration(const std::string& root_directory, const std::string& account_name, const std::string& character_name, const CharacterMigrationData& snapshot_data, std::string* error_message, objects_json::ObjectSaveData* converted_source = nullptr)
     {
         if (!snapshot_data.object_file.present)
             return write_default_account_object_file(root_directory, account_name, character_name, error_message);
@@ -396,7 +399,12 @@ namespace {
             log(log_buffer);
         }
 
-        return write_account_object_json_file(root_directory, account_name, character_name, object_data, error_message);
+        if (!write_account_object_json_file(root_directory, account_name, character_name, object_data, error_message))
+            return false;
+
+        if (converted_source != nullptr)
+            *converted_source = std::move(object_data);
+        return true;
     }
 
     bool hydrate_account_native_character_file_from_migration(const std::string& root_directory, const std::string& account_name, const std::string& character_name, const CharacterMigrationData& snapshot_data, std::string* error_message, char_file_u* converted_source)
@@ -458,7 +466,9 @@ namespace {
         return write_text_file_atomically(resolved_exploits_path(account, root_directory, character_name), exploits_json::serialize_exploits_to_json(exploit_history), error_message);
     }
 
-    bool hydrate_account_native_exploit_file_from_migration(const std::string& root_directory, const std::string& account_name, const std::string& character_name, const CharacterMigrationData& snapshot_data, std::string* error_message)
+    // `converted_source` as for the object file above: the parsed legacy records, left untouched when
+    // there is no legacy .exploits file.
+    bool hydrate_account_native_exploit_file_from_migration(const std::string& root_directory, const std::string& account_name, const std::string& character_name, const CharacterMigrationData& snapshot_data, std::string* error_message, std::vector<exploit_record>* converted_source = nullptr)
     {
         if (!snapshot_data.exploits_file.present)
             return write_default_account_exploit_file(root_directory, account_name, character_name, error_message);
@@ -473,7 +483,12 @@ namespace {
 
         exploits_json::ExploitHistoryData exploit_history;
         exploit_history.records = std::move(records);
-        return write_account_exploits_json_file(root_directory, account_name, character_name, exploit_history, error_message);
+        if (!write_account_exploits_json_file(root_directory, account_name, character_name, exploit_history, error_message))
+            return false;
+
+        if (converted_source != nullptr)
+            *converted_source = std::move(exploit_history.records);
+        return true;
     }
 
     void append_restore_failure(std::string* error_message, const std::string& restore_error)
@@ -701,6 +716,87 @@ namespace {
         return true;
     }
 
+    // The same proof for the object file, read back the way login reads it -- JSON to structure to
+    // the legacy binary the object loader consumes -- so a file login could not load is refused here
+    // while the .obj still exists. No exemption list: unlike the character file, nothing in it is
+    // deliberately not carried over, so any difference is real loss.
+    bool verify_converted_object_file(const std::string& root_directory, const std::string& account_name, const std::string& character_name, const objects_json::ObjectSaveData& source, std::string* error_message)
+    {
+        std::string object_bytes;
+        std::string read_error;
+        if (!read_account_object_file(root_directory, account_name, character_name, &object_bytes, &read_error)) {
+            set_error(error_message, "Converted object file for '" + character_name + "' cannot be read back: " + read_error);
+            return false;
+        }
+
+        objects_json::ObjectSaveData readback;
+        if (!objects_json::object_save_data_from_binary(object_bytes, &readback, &read_error)) {
+            set_error(error_message, "Converted object file for '" + character_name + "' cannot be loaded back: " + read_error);
+            return false;
+        }
+
+        const std::string lossy_field = objects_json::first_differing_field(source, readback);
+        if (!lossy_field.empty()) {
+            set_error(error_message, "Conversion of '" + character_name + "' would lose data: object field '" + lossy_field + "' does not survive the round trip.");
+            return false;
+        }
+
+        return true;
+    }
+
+    // A character with no legacy .obj gets a default file instead. It holds nothing to lose, but login
+    // refuses a character whose account object file exists and will not read
+    // (load_object_save_bytes_for_character), and the player file is retired straight after -- so it
+    // must at least read back. Its contents are not compared: that would mean a second copy of what
+    // write_default_account_object_file writes, which new-character creation shares.
+    bool verify_default_object_file_reads_back(const std::string& root_directory, const std::string& account_name, const std::string& character_name, std::string* error_message)
+    {
+        std::string object_bytes;
+        std::string read_error;
+        if (!read_account_object_file(root_directory, account_name, character_name, &object_bytes, &read_error)) {
+            set_error(error_message, "Default object file for '" + character_name + "' cannot be read back: " + read_error);
+            return false;
+        }
+
+        return true;
+    }
+
+    // The same for a default exploits file, which is an empty list, so checking that is free.
+    bool verify_default_exploit_file_reads_back_empty(const std::string& root_directory, const std::string& account_name, const std::string& character_name, std::string* error_message)
+    {
+        std::vector<exploit_record> readback;
+        std::string read_error;
+        if (!read_account_exploit_file(root_directory, account_name, character_name, &readback, &read_error)) {
+            set_error(error_message, "Default exploit file for '" + character_name + "' cannot be read back: " + read_error);
+            return false;
+        }
+        if (!readback.empty()) {
+            set_error(error_message, "Default exploit file for '" + character_name + "' is not empty: it holds " + std::to_string(readback.size()) + " record(s).");
+            return false;
+        }
+
+        return true;
+    }
+
+    // And for the exploits file, read back through the reader login uses.
+    bool verify_converted_exploit_file(const std::string& root_directory, const std::string& account_name, const std::string& character_name, const std::vector<exploit_record>& source, std::string* error_message)
+    {
+        std::vector<exploit_record> readback;
+        std::string read_error;
+        if (!read_account_exploit_file(root_directory, account_name, character_name, &readback, &read_error)) {
+            set_error(error_message, "Converted exploit file for '" + character_name + "' cannot be read back: " + read_error);
+            return false;
+        }
+
+        const std::string lossy_field = exploits_json::first_differing_field(source, readback);
+        if (!lossy_field.empty()) {
+            set_error(error_message, "Conversion of '" + character_name + "' would lose data: exploit field '" + lossy_field + "' does not survive the round trip.");
+            return false;
+        }
+
+        return true;
+    }
+
     bool migrate_legacy_character_files_internal(const std::string& root_directory, const std::string& account_name, const std::string& character_name, const std::string& player_file_path, const std::string& stale_flat_player_file_path, const std::string& object_file_path, const std::string& exploits_file_path, long migrated_at, CharacterMigrationData* migration, std::string* error_message)
     {
         CharacterMigrationData snapshot_data;
@@ -741,11 +837,27 @@ namespace {
             roll_back_account_native_outputs();
             return false;
         }
-        if (!hydrate_account_native_object_file_from_migration(root_directory, account_name, character_name, snapshot_data, error_message)) {
+        objects_json::ObjectSaveData converted_objects;
+        if (!hydrate_account_native_object_file_from_migration(root_directory, account_name, character_name, snapshot_data, error_message, &converted_objects)) {
             roll_back_account_native_outputs();
             return false;
         }
-        if (!hydrate_account_native_exploit_file_from_migration(root_directory, account_name, character_name, snapshot_data, error_message)) {
+        const bool object_file_verified = snapshot_data.object_file.present
+            ? verify_converted_object_file(root_directory, account_name, character_name, converted_objects, error_message)
+            : verify_default_object_file_reads_back(root_directory, account_name, character_name, error_message);
+        if (!object_file_verified) {
+            roll_back_account_native_outputs();
+            return false;
+        }
+        std::vector<exploit_record> converted_exploits;
+        if (!hydrate_account_native_exploit_file_from_migration(root_directory, account_name, character_name, snapshot_data, error_message, &converted_exploits)) {
+            roll_back_account_native_outputs();
+            return false;
+        }
+        const bool exploit_file_verified = snapshot_data.exploits_file.present
+            ? verify_converted_exploit_file(root_directory, account_name, character_name, converted_exploits, error_message)
+            : verify_default_exploit_file_reads_back_empty(root_directory, account_name, character_name, error_message);
+        if (!exploit_file_verified) {
             roll_back_account_native_outputs();
             return false;
         }

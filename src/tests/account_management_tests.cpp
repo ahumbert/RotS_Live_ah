@@ -1756,6 +1756,95 @@ TEST(AccountManagement, AccountNativeObjectWriteRejectsLegacyObjectFileWithoutFo
     EXPECT_FALSE(account::account_object_file_exists(temp_directory.path(), "alpha-admin", "aragorn", nullptr));
 }
 
+TEST(AccountManagement, LinkedCharacterObjectRefreshAcceptsAnIdleSaveWithoutFollowerSection)
+{
+    // Every game save is copied into the account through write_linked_character_object_file. The
+    // idle-out save (Crash_idlesave) writes no follower section -- historic behaviour -- and it is
+    // also the save that destroys keys and NORENT items. When that copy was refused, objects.json
+    // kept the previous 30-second save, and the next login handed the unrentable items back.
+    TemporaryDirectory temp_directory;
+    std::string error_message;
+
+    ASSERT_TRUE(account::create_account(temp_directory.path(), "alpha-admin", "player@example.com", "ValidPass1", 1700007776, nullptr, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_link_character(temp_directory.path(), "alpha-admin", "aragorn", 1700007777, nullptr, &error_message)) << error_message;
+
+    const int kKeyVnum = 11376;
+    const int kNorentVnum = 1138;
+    const int kRingVnum = 6654;
+
+    objects_json::ObjectSaveData autosave;
+    autosave.rent.rentcode = RENT_CRASH;
+    for (int vnum : { kKeyVnum, kNorentVnum, kRingVnum }) {
+        autosave.objects.push_back(objects_json::ObjectRecord {});
+        autosave.objects.back().item_number = vnum;
+        autosave.objects.back().wear_pos = MAX_WEAR;
+    }
+    std::string autosave_bytes;
+    ASSERT_TRUE(objects_json::object_save_data_to_binary(autosave, &autosave_bytes, &error_message)) << error_message;
+    ASSERT_TRUE(account::write_linked_character_object_file(temp_directory.path(), "aragorn", autosave_bytes, &error_message)) << error_message;
+
+    objects_json::ObjectSaveData idle_save;
+    idle_save.rent.rentcode = RENT_TIMEDOUT;
+    idle_save.objects.push_back(objects_json::ObjectRecord {});
+    idle_save.objects.back().item_number = kRingVnum;
+    idle_save.objects.back().wear_pos = MAX_WEAR;
+    std::string idle_save_bytes;
+    ASSERT_TRUE(objects_json::object_save_data_to_binary(idle_save, &idle_save_bytes, &error_message)) << error_message;
+    ASSERT_GT(idle_save_bytes.size(), sizeof(follower_file_elem));
+    idle_save_bytes.erase(idle_save_bytes.size() - sizeof(follower_file_elem)); // no follower section, as Crash_idlesave writes it
+
+    EXPECT_TRUE(account::write_linked_character_object_file(temp_directory.path(), "aragorn", idle_save_bytes, &error_message)) << error_message;
+
+    std::string loaded_bytes;
+    ASSERT_TRUE(account::read_account_object_file(temp_directory.path(), "alpha-admin", "aragorn", &loaded_bytes, &error_message)) << error_message;
+    objects_json::ObjectSaveData loaded;
+    ASSERT_TRUE(objects_json::object_save_data_from_binary(loaded_bytes, &loaded, &error_message)) << error_message;
+    EXPECT_EQ(loaded.rent.rentcode, RENT_TIMEDOUT) << "objects.json still holds the save before the idle-out";
+    ASSERT_EQ(loaded.objects.size(), 1u) << "the key and the NORENT item would come back at the next login";
+    EXPECT_EQ(loaded.objects[0].item_number, kRingVnum);
+    EXPECT_TRUE(loaded.followers.empty());
+}
+
+TEST(AccountManagement, LinkedCharacterObjectRefreshStillRejectsAPartialFollowerRecord)
+{
+    // Only a follower section missing entirely is forgiven. A save cut off part-way through a
+    // follower record is damaged, and must not replace the good copy.
+    TemporaryDirectory temp_directory;
+    std::string error_message;
+
+    ASSERT_TRUE(account::create_account(temp_directory.path(), "alpha-admin", "player@example.com", "ValidPass1", 1700007776, nullptr, &error_message)) << error_message;
+    ASSERT_TRUE(account::admin_link_character(temp_directory.path(), "alpha-admin", "aragorn", 1700007777, nullptr, &error_message)) << error_message;
+
+    objects_json::ObjectSaveData good;
+    good.rent.rentcode = RENT_CRASH;
+    good.objects.push_back(objects_json::ObjectRecord {});
+    good.objects.back().item_number = 1234;
+    good.objects.back().wear_pos = MAX_WEAR;
+    std::string good_bytes;
+    ASSERT_TRUE(objects_json::object_save_data_to_binary(good, &good_bytes, &error_message)) << error_message;
+    ASSERT_TRUE(account::write_linked_character_object_file(temp_directory.path(), "aragorn", good_bytes, &error_message)) << error_message;
+
+    objects_json::ObjectSaveData with_follower = good;
+    with_follower.followers.push_back(objects_json::FollowerData {});
+    with_follower.followers.back().fol_vnum = 6601;
+    std::string damaged_bytes;
+    ASSERT_TRUE(objects_json::object_save_data_to_binary(with_follower, &damaged_bytes, &error_message)) << error_message;
+    // Drop the terminator, the follower's object sentinel and half of its follower record.
+    const size_t cut = sizeof(follower_file_elem) + sizeof(obj_file_elem) + sizeof(follower_file_elem) / 2;
+    ASSERT_GT(damaged_bytes.size(), cut);
+    damaged_bytes.erase(damaged_bytes.size() - cut);
+
+    EXPECT_FALSE(account::write_linked_character_object_file(temp_directory.path(), "aragorn", damaged_bytes, &error_message));
+    EXPECT_NE(error_message.find("Truncated objects data"), std::string::npos) << error_message;
+
+    std::string loaded_bytes;
+    ASSERT_TRUE(account::read_account_object_file(temp_directory.path(), "alpha-admin", "aragorn", &loaded_bytes, &error_message)) << error_message;
+    objects_json::ObjectSaveData loaded;
+    ASSERT_TRUE(objects_json::object_save_data_from_binary(loaded_bytes, &loaded, &error_message)) << error_message;
+    ASSERT_EQ(loaded.objects.size(), 1u);
+    EXPECT_EQ(loaded.objects[0].item_number, 1234) << "the good copy must be left in place";
+}
+
 TEST(AccountManagement, WritesDefaultAccountNativeObjectFile)
 {
     TemporaryDirectory temp_directory;

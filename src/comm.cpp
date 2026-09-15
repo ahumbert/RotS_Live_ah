@@ -1695,15 +1695,23 @@ SocketType pnew_descriptor(SocketType s)
 
 extern sh_int screen_width; /* config.cpp */
 
-void append_lines(char* target, char* source, int* len)
+/* Copies source to target, breaking lines longer than screen_width. Writes at most `space` bytes,
+   the terminating NUL included, and returns false if all of source did not fit. */
+bool append_lines(char* target, char* source, int* len, size_t space)
 {
     register sh_int i, tmp;
     int sourcelen;
+    const char* const last = target + space - 1; /* reserved for the NUL */
+    bool fitted = true;
 
     tmp = *len;
     sourcelen = strlen(source);
 
     for (i = 0; i < sourcelen; i++) {
+        if (target >= last) {
+            fitted = false;
+            break;
+        }
         *(target++) = source[i];
         tmp++;
         if (source[i] == '\r')
@@ -1711,6 +1719,10 @@ void append_lines(char* target, char* source, int* len)
         if (source[i] == '\n')
             tmp--;
         if (tmp > screen_width) {
+            if (last - target < 2) {
+                fitted = false;
+                break;
+            }
             *(target++) = '\n';
             *(target++) = '\r';
             tmp = 0;
@@ -1718,6 +1730,7 @@ void append_lines(char* target, char* source, int* len)
     }
     *len = tmp;
     *target = 0;
+    return fitted;
 }
 
 char process_output_buffer[LARGE_BUFSIZE + 20];
@@ -1743,9 +1756,13 @@ int process_output(struct descriptor_data* t)
         t->bare_prompt_pending = false;
     } else
         i_shift = 0;
-    if ((t->character) && (IS_SET(PRF_FLAGS(t->character), PRF_WRAP)))
-        append_lines(i + 2 + i_shift, t->output, &wid_count);
-    else
+    bool wrap_cut_short = false;
+    if ((t->character) && (IS_SET(PRF_FLAGS(t->character), PRF_WRAP))) {
+        /* The wrap breaks make the text longer than the queue it came from; keep it inside the
+           buffer, leaving room for the "**OVERFLOW**" and "\n\r" added below. */
+        const size_t space = sizeof(process_output_buffer) - (2 + i_shift) - strlen("**OVERFLOW**") - strlen("\n\r");
+        wrap_cut_short = !append_lines(i + 2 + i_shift, t->output, &wid_count, space);
+    } else
         strcpy(i + 2 + i_shift, t->output);
 
     /* they don't have latin-1 set. unaccent all of our latin-1 chars */
@@ -1754,7 +1771,7 @@ int process_output(struct descriptor_data* t)
             for (c = i + 2; *c; ++c)
                 *c = unaccent(*c);
 
-    if (t->bufptr < 0)
+    if (t->bufptr < 0 || wrap_cut_short)
         strcat(i + 2, "**OVERFLOW**");
 
     if (!t->connected && !(t->character && !IS_NPC(t->character) && PRF_FLAGGED(t->character, PRF_COMPACT)))

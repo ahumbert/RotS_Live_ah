@@ -403,13 +403,31 @@ void list_obj_to_char(obj_data* list, char_data* ch, int mode, bool show)
         send_to_char(inventory_message.c_str(), ch);
     } else {
         bool found = show;
+        // A room floor lists at most this many objects and counts the rest in one line. A floor of a
+        // few hundred objects otherwise fills the player's 16 KB output buffer, and everything sent
+        // after the objects -- the people in the room -- is dropped.
+        const int max_floor_objects_listed = 100;
+        int listed = 0;
+        int unlisted = 0;
         for (obj_data* root_object = list; root_object; root_object = root_object->next_content) {
             if (CAN_SEE_OBJ(ch, root_object)) {
+                if (!show && mode == 0 && listed >= max_floor_objects_listed) {
+                    ++unlisted;
+                    continue;
+                }
                 show_obj_to_char(root_object, ch, mode);
+                ++listed;
                 found = true;
             } else if (show) {
                 send_to_char("Something.\n\r", ch);
             }
+        }
+
+        if (unlisted > 0) {
+            char summary[80];
+            snprintf(summary, sizeof(summary), "...and %d more item%s lying here.\n\r", unlisted,
+                unlisted == 1 ? " is" : "s are");
+            send_to_char(summary, ch);
         }
 
         // The character should get a report that the container is empty.
